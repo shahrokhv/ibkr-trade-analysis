@@ -20,6 +20,16 @@ from pathlib import Path
 import pandas as pd
 
 
+def hosted_publicly() -> bool:
+    """True on Streamlit Community Cloud, where this app must not call IBKR."""
+    if os.environ.get("STREAMLIT_RUNTIME_ENV", "").lower() == "cloud":
+        return True
+    if Path("/mount/src").exists():
+        return True
+    home = os.environ.get("HOME", "").replace("\\", "/").rstrip("/")
+    return home == "/home/adminuser"
+
+
 def flex_token() -> str:
     """Read the Flex token from the environment, a local file, or Streamlit secrets."""
     env = os.environ.get("IBKR_FLEX_TOKEN", "").strip()
@@ -79,6 +89,8 @@ def fetch_ibkr_trades(
     it through the same cleaner used for an uploaded file.
     """
     resolved = (token or flex_token()).strip()
+    if hosted_publicly():
+        raise FlexServiceError("IBKR sync is turned off on the public site.")
     if not resolved:
         raise FlexServiceError("Set IBKR_FLEX_TOKEN, or save the token in .ibkr_token, before syncing.")
     return fetch_multi_year_history(resolved, query_id, years=years, progress=progress)

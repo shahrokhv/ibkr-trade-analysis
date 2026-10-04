@@ -6,7 +6,6 @@ import csv
 import hashlib
 import io
 import math
-import os
 import re
 import sys
 from collections import defaultdict, deque
@@ -18,7 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from ibkr_service import DEFAULT_QUERY_ID, FlexServiceError, fetch_ibkr_trades
+from ibkr_service import DEFAULT_QUERY_ID, FlexServiceError, fetch_ibkr_trades, hosted_publicly
 
 EPS = 1e-8
 REVENGE_WINDOW = timedelta(minutes=10)
@@ -2077,15 +2076,8 @@ def inject_css() -> None:
 
 
 def running_locally() -> bool:
-    """Streamlit Community Cloud should not expose the IBKR sync button."""
-    if os.environ.get("STREAMLIT_RUNTIME_ENV", "").lower() == "cloud":
-        return False
-    if Path("/mount/src").exists():
-        return False
-    home = os.environ.get("HOME", "").replace("\\", "/").rstrip("/")
-    if home == "/home/adminuser":
-        return False
-    return True
+    """The IBKR sync control is only for the copy running on this computer."""
+    return not hosted_publicly()
 
 
 def show_page_title() -> None:
@@ -2663,7 +2655,7 @@ def main() -> None:
         )
         use_sample = st.toggle("Use sample data", value=False)
 
-    if sync_clicked:
+    if sync_clicked and running_locally():
         with st.status("Syncing 5 years of IBKR trades in 365-day chunks.", expanded=True) as status:
             def on_chunk(index: int, total: int, start, end) -> None:
                 status.write(f"Chunk {index} of {total}: {start.isoformat()} to {end.isoformat()}")
