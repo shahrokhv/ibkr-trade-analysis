@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.ibkr_token
+trade_analytics_report.html
+data/flex/*.csv
