@@ -2069,6 +2069,23 @@ def inject_css() -> None:
             padding-top: 2px;
             padding-bottom: 2px;
         }
+        """
+        + (
+            """
+        [data-testid="stToolbarActions"],
+        [data-testid="stToolbarActionButton"],
+        [data-testid="stStatusWidget"],
+        [data-testid="stMainMenu"],
+        [data-testid="stDeployButton"] {
+            display: none !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+        }
+        """
+            if hosted_publicly()
+            else ""
+        )
+        + """
         </style>
         """,
         unsafe_allow_html=True,
@@ -2686,6 +2703,8 @@ print(f"Successfully combined {len(csv_files)} yearly files into Trade_History_C
 
 def main() -> None:
     st.set_page_config(page_title="IBKR Trade Analysis", page_icon="📈", layout="wide")
+    if hosted_publicly():
+        st.set_option("client.toolbarMode", "minimal")
     inject_css()
 
     if "ibkr_bundle" not in st.session_state:
