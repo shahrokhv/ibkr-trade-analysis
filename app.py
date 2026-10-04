@@ -2607,6 +2607,83 @@ def load_saved_flex(directory: Path = FLEX_DIR) -> tuple[pd.DataFrame, list[str]
     return executions, notes
 
 
+@st.dialog("How to make a Flex Query file", width="large")
+def show_flex_query_guide() -> None:
+    st.markdown(
+        """
+**Step 1. Open the Flex Queries page**
+
+1. Log in to your Interactive Brokers Client Portal.
+2. Go to **Performance & Reports → Flex Queries**.
+
+**Step 2. Create the activity Flex Query**
+
+1. Next to **Activity Flex Query**, click the **+** icon to create a new template.
+2. Enter a query name, for example `Trade Analysis Export`.
+
+**Step 3. Select the required columns**
+
+1. Click **Trades** under the Sections list.
+2. In the pop-up, select only these 20 columns:
+
+- Currency
+- FX Rate To Base
+- Asset Class
+- Symbol
+- Multiplier
+- Date/Time
+- Quantity
+- TradePrice
+- Proceeds
+- IB Commission
+- Open/Close Indicator
+- Buy/Sell
+- Order Type
+- Strike
+- Expiry
+- Put/Call
+- IB Commission Currency
+- Notes/Codes
+- Order Time
+- Level Of Detail
+
+3. Scroll down and click **Save**.
+
+**Step 4. Export each year**
+
+IBKR limits one query to 365 days, so download one year at a time.
+
+1. Under **General Settings**, set **Period** to **Custom Date Range**.
+2. For the first file, use **2021/01/01** through **2021/12/31**, set the format to **CSV**, and save the query.
+3. Click the yellow **Run** button next to the saved query and download the CSV. Name it `trades_2021.csv`.
+4. Click the pencil icon next to that query.
+5. Change the dates to the next year, for example **2022/01/01** through **2022/12/31**, then click **Save**.
+6. Click **Run** again and save that file as `trades_2022.csv`.
+7. Repeat for each year through the current date.
+
+**Step 5. Combine the yearly files into one**
+
+Put the downloaded files in one folder, then use Python or Command Prompt. Upload `Trade_History_Combined.csv` with the file button in this sidebar.
+        """
+    )
+    st.markdown("**Method A. Python**")
+    st.caption("Place the yearly CSV files in one folder and run this script there.")
+    st.code(
+        """import glob
+import pandas as pd
+
+csv_files = glob.glob("trades_*.csv")
+combined_df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+combined_df.to_csv("Trade_History_Combined.csv", index=False)
+print(f"Successfully combined {len(csv_files)} yearly files into Trade_History_Combined.csv!")
+""",
+        language="python",
+    )
+    st.markdown("**Method B. Windows Command Prompt**")
+    st.caption("Open Command Prompt in the folder that holds the yearly files, then run:")
+    st.code("copy trades_*.csv Trade_History_Combined.csv", language="text")
+
+
 def main() -> None:
     st.set_page_config(page_title="IBKR Trade Analysis", page_icon="📈", layout="wide")
     inject_css()
@@ -2653,6 +2730,8 @@ def main() -> None:
             type=["csv", "txt", "xlsx", "xlsm"],
             help="A newly chosen file is used for this session.",
         )
+        if st.button("How to make Query flex file", use_container_width=True):
+            show_flex_query_guide()
         use_sample = st.toggle("Use sample data", value=False)
 
     if sync_clicked and running_locally():
