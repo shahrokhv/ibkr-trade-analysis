@@ -27,8 +27,6 @@ FEE_DRAG_RATIO = 0.20
 DEFAULT_CAD_PER_USD = 1.38
 SUPPORTED_CURRENCIES = {"USD", "CAD"}
 FLEX_DIR = Path(__file__).resolve().parent / "data" / "flex"
-RRSP_DIR = Path(__file__).resolve().parent / "RRSP data"
-RRSP_COMBINED_NAME = "Trade_Execution_History_Combined.csv"
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 OUTLIER_SYMBOLS = frozenset({"AMD", "SOXL"})
 LEVERAGED_ETFS = frozenset(
@@ -2617,15 +2615,6 @@ def save_flex_sync(combined_csv: str, chunks: list[dict], directory: Path = FLEX
     return written
 
 
-def load_saved_rrsp(directory: Path = RRSP_DIR) -> tuple[pd.DataFrame, list[str]] | None:
-    path = directory / RRSP_COMBINED_NAME
-    if not path.is_file():
-        return None
-    executions, notes = load_executions(path.name, path.read_bytes())
-    notes = ["Loaded the saved RRSP trades."] + list(notes)
-    return executions, notes
-
-
 def load_saved_flex(directory: Path = FLEX_DIR) -> tuple[pd.DataFrame, list[str]] | None:
     path = directory / "combined.csv"
     if not path.is_file():
@@ -2737,24 +2726,7 @@ def main() -> None:
             }
             st.session_state.prefer_ibkr = True
 
-    if "rrsp_bundle" not in st.session_state:
-        st.session_state.rrsp_bundle = None
-    if "prefer_rrsp" not in st.session_state:
-        st.session_state.prefer_rrsp = False
-    if "rrsp_origin" not in st.session_state:
-        st.session_state.rrsp_origin = ""
-
     with st.sidebar:
-        st.markdown("**RRSP**")
-        rrsp_upload = st.file_uploader(
-            "Drop an RRSP account CSV",
-            type=["csv", "txt"],
-            key="rrsp-upload",
-            help="Trade execution history for the RRSP account. The dashboard switches to this file.",
-        )
-        load_rrsp = False
-        if running_locally() and (RRSP_DIR / RRSP_COMBINED_NAME).is_file():
-            load_rrsp = st.button("Load saved RRSP trades", use_container_width=True)
         st.markdown("**Data**")
         local_app = running_locally()
         sync_clicked = False
@@ -2781,25 +2753,6 @@ def main() -> None:
             show_flex_query_guide()
         use_sample = st.toggle("Use sample data", value=False)
 
-    if load_rrsp:
-        loaded_rrsp = load_saved_rrsp()
-        if loaded_rrsp is None:
-            st.sidebar.error("The saved RRSP file was not found.")
-        else:
-            rrsp_executions, rrsp_notes = loaded_rrsp
-            st.session_state.rrsp_bundle = {"executions": rrsp_executions, "notes": rrsp_notes}
-            st.session_state.prefer_rrsp = True
-            st.session_state.prefer_ibkr = False
-            st.session_state.rrsp_origin = "saved"
-
-    if rrsp_upload is not None:
-        rrsp_id = f"{rrsp_upload.name}:{getattr(rrsp_upload, 'size', len(rrsp_upload.getvalue()))}"
-        if st.session_state.get("last_rrsp_id") != rrsp_id and not sync_clicked and not load_rrsp:
-            st.session_state.last_rrsp_id = rrsp_id
-            st.session_state.prefer_rrsp = True
-            st.session_state.prefer_ibkr = False
-            st.session_state.rrsp_origin = "upload"
-
     if sync_clicked and running_locally():
         with st.status("Syncing 5 years of IBKR trades in 365-day chunks.", expanded=True) as status:
             def on_chunk(index: int, total: int, start, end) -> None:
@@ -2818,7 +2771,6 @@ def main() -> None:
                     "notes": synced_notes,
                 }
                 st.session_state.prefer_ibkr = True
-                st.session_state.prefer_rrsp = False
                 st.session_state.ibkr_error = ""
                 status.write("Saved " + ", ".join(written))
                 status.update(label=f"Synced {len(synced_executions):,} executions", state="complete")
@@ -2837,30 +2789,14 @@ def main() -> None:
             st.session_state.last_upload_id = upload_id
             if not sync_clicked:
                 st.session_state.prefer_ibkr = False
-                st.session_state.prefer_rrsp = False
 
     sample_was_on = bool(st.session_state.get("sample_was_on", False))
     if use_sample and not sample_was_on and not sync_clicked:
         st.session_state.prefer_ibkr = False
-        st.session_state.prefer_rrsp = False
     st.session_state.sample_was_on = use_sample
 
-    rrsp_bundle = st.session_state.rrsp_bundle
-    if st.session_state.prefer_rrsp and st.session_state.rrsp_origin == "upload" and rrsp_upload is not None:
-        try:
-            executions, notes_tuple = cached_executions(rrsp_upload.name, rrsp_upload.getvalue())
-            notes = ["RRSP account."] + list(notes_tuple)
-        except Exception as exc:
-            show_page_title()
-            st.error(f"Could not read that RRSP file. {exc}")
-            return
-        source = "RRSP"
-    elif st.session_state.prefer_rrsp and rrsp_bundle:
-        executions = rrsp_bundle["executions"]
-        notes = list(rrsp_bundle["notes"])
-        source = "RRSP"
-    elif st.session_state.prefer_ibkr and st.session_state.ibkr_bundle:
-        bundle = st.session_state.ibkr_bundle
+    bundle = st.session_state.ibkr_bundle
+    if st.session_state.prefer_ibkr and bundle:
         executions = bundle["executions"]
         notes = list(bundle["notes"])
         source = "IBKR Flex Query"

@@ -3,4 +3,3 @@ __pycache__/
 .ibkr_token
 trade_analytics_report.html
 data/flex/*.csv
-RRSP data/
