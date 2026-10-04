@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import math
+import os
 import re
 import sys
 from collections import defaultdict, deque
@@ -2075,13 +2076,25 @@ def inject_css() -> None:
     )
 
 
+def running_locally() -> bool:
+    """Streamlit Community Cloud should not expose the IBKR sync button."""
+    if os.environ.get("STREAMLIT_RUNTIME_ENV", "").lower() == "cloud":
+        return False
+    if Path("/mount/src").exists():
+        return False
+    home = os.environ.get("HOME", "").replace("\\", "/").rstrip("/")
+    if home == "/home/adminuser":
+        return False
+    return True
+
+
 def show_page_title() -> None:
     st.title("IBKR Trade Analysis")
     st.caption("Parse Interactive Brokers exports, match round trips with FIFO, and review realized PnL.")
 
 
 def render_empty_state() -> None:
-    st.info("Sync with IBKR from the sidebar, drop a CSV, or turn on sample data to explore the dashboard.")
+    st.info("Drop a CSV, or turn on sample data to explore the dashboard.")
     with st.expander("Exports this app can read", expanded=True):
         st.markdown(
             """
@@ -2627,23 +2640,26 @@ def main() -> None:
 
     with st.sidebar:
         st.markdown("**Data**")
-        sync_clicked = st.button("🔄 Sync with IBKR (Live Flex Query)", use_container_width=True)
-        saved = (FLEX_DIR / "combined.csv").is_file()
-        synced_count = 0
-        if st.session_state.prefer_ibkr and st.session_state.ibkr_bundle:
-            synced_count = len(st.session_state.ibkr_bundle["executions"])
-        sync_bits = [f"Query {DEFAULT_QUERY_ID}", "5 years"]
-        if saved:
-            sync_bits.append("loads from data/flex")
-        if synced_count:
-            sync_bits.append(f"{synced_count:,} executions")
-        st.caption(" · ".join(sync_bits))
-        if st.session_state.ibkr_error:
-            st.error(st.session_state.ibkr_error)
+        local_app = running_locally()
+        sync_clicked = False
+        if local_app:
+            sync_clicked = st.button("🔄 Sync with IBKR (Live Flex Query)", use_container_width=True)
+            saved = (FLEX_DIR / "combined.csv").is_file()
+            synced_count = 0
+            if st.session_state.prefer_ibkr and st.session_state.ibkr_bundle:
+                synced_count = len(st.session_state.ibkr_bundle["executions"])
+            sync_bits = [f"Query {DEFAULT_QUERY_ID}", "5 years"]
+            if saved:
+                sync_bits.append("loads from data/flex")
+            if synced_count:
+                sync_bits.append(f"{synced_count:,} executions")
+            st.caption(" · ".join(sync_bits))
+            if st.session_state.ibkr_error:
+                st.error(st.session_state.ibkr_error)
         uploaded = st.file_uploader(
-            "Or drop a Flex Query, trade confirmation, or trade CSV",
+            "Drop a Flex Query, trade confirmation, or trade CSV",
             type=["csv", "txt", "xlsx", "xlsm"],
-            help="Manual fallback. A newly chosen file is used instead of the last IBKR sync.",
+            help="A newly chosen file is used for this session.",
         )
         use_sample = st.toggle("Use sample data", value=False)
 
