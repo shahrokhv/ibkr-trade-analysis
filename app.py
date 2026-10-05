@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import math
 import re
 import sys
+import urllib.request
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -856,6 +858,90 @@ def fx_multiplier(source: str, target: str, cad_per_usd: float) -> float | None:
     if destination == "USD":
         return 1.0 / cad_per_usd
     return None
+
+
+YAHOO_USDCAD_URL = "https://query1.finance.yahoo.com/v8/finance/chart/USDCAD=X?interval=1m&range=1d"
+FRANKFURTER_USDCAD_URL = "https://api.frankfurter.app/latest?from=USD&to=CAD"
+
+
+def displayed_fx_quote(cad_per_usd: float, currency: str) -> float:
+    """Rate shown beside the currency choice. CAD is CAD per 1 USD; USD is USD per 1 CAD."""
+    quote = float(cad_per_usd)
+    if quote <= 0:
+        return DEFAULT_CAD_PER_USD
+    if str(currency or "CAD").upper() == "USD":
+        return 1.0 / quote
+    return quote
+
+
+def canonical_cad_per_usd(shown: float, currency: str) -> float:
+    """Turn the rate in the box back into CAD per 1 USD."""
+    rate = float(shown)
+    if not math.isfinite(rate) or rate <= 0:
+        return DEFAULT_CAD_PER_USD
+    if str(currency or "CAD").upper() == "USD":
+        return 1.0 / rate
+    return rate
+
+
+def _plausible_cad_per_usd(price: float) -> float | None:
+    if not math.isfinite(price) or price < 0.8 or price > 2.5:
+        return None
+    return float(price)
+
+
+def parse_yahoo_usd_cad(payload: dict) -> float | None:
+    try:
+        price = float(payload["chart"]["result"][0]["meta"]["regularMarketPrice"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    return _plausible_cad_per_usd(price)
+
+
+def parse_frankfurter_usd_cad(payload: dict) -> float | None:
+    try:
+        price = float(payload["rates"]["CAD"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return _plausible_cad_per_usd(price)
+
+
+def _read_json(url: str) -> dict | None:
+    request = urllib.request.Request(url, headers={"User-Agent": "ibkr-trade-analysis"})
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def fetch_market_cad_per_usd() -> float | None:
+    """Latest CAD per 1 USD. Yahoo is intraday; Frankfurter is the daily fallback."""
+    yahoo = parse_yahoo_usd_cad(_read_json(YAHOO_USDCAD_URL) or {})
+    if yahoo is not None:
+        return yahoo
+    return parse_frankfurter_usd_cad(_read_json(FRANKFURTER_USDCAD_URL) or {})
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def cached_market_cad_per_usd() -> float | None:
+    return fetch_market_cad_per_usd()
+
+
+@st.fragment(run_every=timedelta(seconds=60))
+def _refresh_live_fx() -> None:
+    """Rerun the page when the followed market quote changes."""
+    if not st.session_state.get("fx-follow-market", True):
+        return
+    market = cached_market_cad_per_usd()
+    if market is None:
+        return
+    rounded = round(float(market), 6)
+    seen = st.session_state.get("fx-market-seen")
+    st.session_state["fx-market-seen"] = rounded
+    if seen is not None and abs(float(seen) - rounded) > 1e-6:
+        st.rerun()
 
 
 def convert_executions(executions: pd.DataFrame, target: str, cad_per_usd: float) -> tuple[pd.DataFrame, list[str]]:
@@ -2451,18 +2537,51 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
             index=1,
             horizontal=True,
             key="display-currency",
-            help="CAD multiplies file dollars by the rate below. USD divides by that same rate.",
+            help="USD shows how many US dollars buy 1 Canadian dollar, about 0.70. CAD shows how many Canadian dollars buy 1 US dollar, about 1.43.",
         )
-        cad_per_usd = st.number_input(
-            "CAD per 1 USD",
-            min_value=0.50,
-            max_value=2.50,
-            value=DEFAULT_CAD_PER_USD,
+        follow_market = st.checkbox(
+            "Live market rate",
+            value=True,
+            key="fx-follow-market",
+            help="Keeps the rate on the latest USD/CAD quote and updates the page when that quote moves. Turn this off to type a rate.",
+        )
+        market_rate = cached_market_cad_per_usd()
+        if "fx-cad-per-usd" not in st.session_state:
+            st.session_state["fx-cad-per-usd"] = float(market_rate or DEFAULT_CAD_PER_USD)
+        rate_key = f"fx-rate-{target_currency}"
+        currency_changed = st.session_state.get("fx-rate-currency") != target_currency
+        st.session_state["fx-rate-currency"] = target_currency
+        using_market = bool(follow_market and market_rate)
+        if using_market:
+            st.session_state["fx-cad-per-usd"] = float(market_rate)
+            st.session_state[rate_key] = round(displayed_fx_quote(float(market_rate), target_currency), 2)
+        elif rate_key not in st.session_state or currency_changed:
+            st.session_state[rate_key] = round(
+                displayed_fx_quote(float(st.session_state["fx-cad-per-usd"]), target_currency),
+                2,
+            )
+        rate_label = "USD per 1 CAD" if target_currency == "USD" else "CAD per 1 USD"
+        typed_rate = st.number_input(
+            rate_label,
+            min_value=0.20,
+            max_value=3.00,
             step=0.01,
             format="%.2f",
-            key="cad-per-usd",
-            help="Press Enter or the arrows. CAD multiplies by this rate. USD divides by it.",
+            key=rate_key,
+            disabled=using_market,
+            help="With Live market rate on, this follows the quote. Turn it off, then press Enter or the arrows to use your own rate.",
         )
+        if not using_market:
+            st.session_state["fx-cad-per-usd"] = canonical_cad_per_usd(float(typed_rate), target_currency)
+        cad_per_usd = float(st.session_state["fx-cad-per-usd"])
+        if using_market:
+            live_quote = displayed_fx_quote(float(market_rate), target_currency)
+            st.caption(f"Live quote {live_quote:.4f}. The page checks again about once a minute.")
+        elif follow_market:
+            st.caption("The live quote is unavailable, so the rate above stays until the feed returns.")
+        else:
+            st.caption("Using the rate typed above.")
+        _refresh_live_fx()
         fx_slot = st.empty()
         export_clicked = st.button(
             "Export report for a friend",
@@ -2522,16 +2641,18 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
 
     latency = median_latency(raw_in_range)
     latency_note = f"  ·  median order-to-fill {format_latency(latency)}" if latency is not None else ""
-    rate_text = f"{float(cad_per_usd):.2f}"
+    shown_quote = displayed_fx_quote(float(cad_per_usd), currency)
     if currency == "CAD":
-        fx_slot.caption(f"CAD amounts multiply file dollars by {rate_text}.")
+        fx_slot.caption(f"CAD amounts use {shown_quote:.4f} Canadian dollars per 1 US dollar.")
+        rate_note = f"{shown_quote:.2f} CAD per 1 USD"
     else:
-        fx_slot.caption(f"USD amounts divide file dollars by {rate_text}.")
+        fx_slot.caption(f"USD amounts use {shown_quote:.4f} US dollars per 1 Canadian dollar.")
+        rate_note = f"{shown_quote:.2f} USD per 1 CAD"
     st.caption(
         f"{source_label}  ·  exits {start_day.isoformat()} to {end_day.isoformat()}  ·  "
         f"{len(raw_in_range)} raw fills  ·  {len(aggregated_in_range)} aggregated trades  ·  "
         f"{summary.closed_count} closed trades  ·  {len(matched.open_lots)} open lots  ·  "
-        f"shown in {currency} at {float(cad_per_usd):.2f} CAD per 1 USD  ·  FIFO, net of IB commission{latency_note}"
+        f"shown in {currency} at {rate_note}  ·  FIFO, net of IB commission{latency_note}"
     )
 
     if exclude_outliers:
@@ -3447,6 +3568,15 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
     assert any("USD" in note for note in usd_notes)
     cad_from_usd, _ = convert_executions(usd_book, "CAD", 1.25)
     assert abs(float(cad_from_usd.iloc[0]["price"]) - 125) < 1e-6
+    assert abs(displayed_fx_quote(1.43, "CAD") - 1.43) < 1e-9
+    assert round(displayed_fx_quote(1.43, "USD"), 2) == 0.70
+    assert abs(canonical_cad_per_usd(0.70, "USD") - (1.0 / 0.70)) < 1e-9
+    assert round(canonical_cad_per_usd(0.70, "USD"), 2) == 1.43
+    assert abs(parse_yahoo_usd_cad({"chart": {"result": [{"meta": {"regularMarketPrice": 1.4281}}]}}) - 1.4281) < 1e-9
+    assert parse_yahoo_usd_cad({"chart": {"result": [{"meta": {"regularMarketPrice": 0.70}}]}}) is None
+    assert parse_yahoo_usd_cad({}) is None
+    assert abs(parse_frankfurter_usd_cad({"rates": {"CAD": 1.424}}) - 1.424) < 1e-9
+    assert parse_frankfurter_usd_cad({"rates": {}}) is None
 
     loss_exit = pd.Timestamp("2024-08-02 10:00:00")
     later_loss = pd.Timestamp("2024-08-02 10:01:00")
