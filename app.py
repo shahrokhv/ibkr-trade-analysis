@@ -364,11 +364,24 @@ def convert_account_amount(amount: float, base: str, target: str, cad_per_usd: f
     return None
 
 
+def _saved_display_currency() -> str:
+    """Currency from the page address, so a browser refresh keeps the last choice."""
+    saved = str(st.query_params.get("currency", "")).upper()
+    return saved if saved in {"USD", "CAD"} else ""
+
+
+def _remember_display_currency(currency: str) -> None:
+    choice = currency if currency in {"USD", "CAD"} else "CAD"
+    if st.query_params.get("currency") != choice:
+        st.query_params["currency"] = choice
+
+
 def _show_rate_for_selected_currency() -> None:
     """Keep the rate box matched to USD or CAD after the radio changes."""
     currency = str(st.session_state.get("display-currency") or "CAD")
     canonical = float(st.session_state.get("fx-cad-per-usd") or DEFAULT_CAD_PER_USD)
     st.session_state["fx-rate-input"] = round(displayed_fx_quote(canonical, currency), 2)
+    _remember_display_currency(currency)
 
 
 def resolve_account_currency(account_value: dict | None, executions: pd.DataFrame) -> dict | None:
@@ -2709,7 +2722,7 @@ def render_dashboard(
         if "fx-cad-per-usd" not in st.session_state:
             st.session_state["fx-cad-per-usd"] = float(market_rate or DEFAULT_CAD_PER_USD)
         if "display-currency" not in st.session_state:
-            st.session_state["display-currency"] = "CAD"
+            st.session_state["display-currency"] = _saved_display_currency() or "CAD"
         if "fx-follow-market" not in st.session_state:
             st.session_state["fx-follow-market"] = True
 
@@ -2719,8 +2732,9 @@ def render_dashboard(
             horizontal=True,
             key="display-currency",
             on_change=_show_rate_for_selected_currency,
-            help="USD shows how many US dollars buy 1 Canadian dollar, about 0.70. CAD shows how many Canadian dollars buy 1 US dollar, about 1.43. This choice stays until you change it.",
+            help="USD shows how many US dollars buy 1 Canadian dollar, about 0.70. CAD shows how many Canadian dollars buy 1 US dollar, about 1.43. A refresh keeps this choice.",
         )
+        _remember_display_currency(str(target_currency))
         follow_market = st.checkbox(
             "Live market rate",
             key="fx-follow-market",
