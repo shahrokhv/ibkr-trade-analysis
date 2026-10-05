@@ -1372,8 +1372,30 @@ def _execution(
     }
 
 
+def _sample_round_trip(
+    source: int,
+    symbol: str,
+    when: str,
+    quantity: float,
+    entry: float,
+    exit_price: float,
+    commission: float,
+    hold_hours: float,
+) -> list[dict]:
+    opened = pd.Timestamp(when)
+    closed = opened + timedelta(hours=hold_hours)
+    return [
+        _execution(source, symbol, str(opened), "BUY", quantity, entry, commission),
+        _execution(source + 1, symbol, str(closed), "SELL", quantity, exit_price, commission),
+    ]
+
+
 def sample_executions() -> pd.DataFrame:
-    """Synthetic fills that exercise FIFO, revenge entries, fee drag, and a large loss."""
+    """Synthetic fills from 2024 through early October 2026.
+
+    The February 2024 block still includes a revenge entry, a fee-heavy day,
+    and one outsized loss. Later round trips give each year something to filter.
+    """
     rows = [
         _execution(1, "AAPL", "2024-02-01 09:35:00", "BUY", 100, 180.00, 1.00),
         _execution(2, "AAPL", "2024-02-01 10:05:00", "SELL", 100, 183.00, 1.00),
@@ -1395,6 +1417,47 @@ def sample_executions() -> pd.DataFrame:
         closed = opened + timedelta(minutes=8)
         rows.append(_execution(source, "TSLA", str(opened), "BUY", 10, 200.00, 1.25))
         rows.append(_execution(source + 1, "TSLA", str(closed), "SELL", 10, 201.00, 1.25))
+        source += 2
+    # symbol, open time, quantity, entry, exit, commission, hold hours
+    later_trips = [
+        ("AAPL", "2024-01-16 10:05:00", 30, 168.00, 171.25, 1.00, 2),
+        ("GOOGL", "2024-03-12 10:15:00", 20, 138.00, 141.40, 1.00, 2),
+        ("MSFT", "2024-04-18 10:30:00", 15, 415.00, 412.20, 1.00, 6),
+        ("NVDA", "2024-05-21 11:00:00", 12, 920.00, 934.00, 1.00, 2),
+        ("TSLA", "2024-06-11 10:20:00", 25, 178.00, 182.50, 1.00, 3),
+        ("GOOGL", "2024-07-16 13:10:00", 18, 185.00, 182.40, 1.00, 6),
+        ("AMZN", "2024-08-08 10:40:00", 16, 167.00, 171.80, 1.00, 2),
+        ("META", "2024-09-19 11:05:00", 10, 540.00, 548.00, 1.00, 2),
+        ("AAPL", "2024-10-22 10:25:00", 22, 228.00, 225.10, 1.00, 5),
+        ("MSFT", "2024-11-14 10:50:00", 12, 425.00, 431.00, 1.00, 2),
+        ("NVDA", "2024-12-09 11:15:00", 8, 138.00, 143.20, 1.00, 2),
+        ("AAPL", "2025-01-15 10:10:00", 28, 232.00, 236.40, 1.00, 2),
+        ("TSLA", "2025-02-20 10:35:00", 20, 355.00, 349.50, 1.00, 6),
+        ("GOOGL", "2025-03-11 11:00:00", 14, 168.00, 172.25, 1.00, 2),
+        ("NVDA", "2025-04-08 10:20:00", 10, 110.00, 116.80, 1.00, 3),
+        ("AMZN", "2025-05-19 13:00:00", 12, 205.00, 201.40, 1.00, 6),
+        ("MSFT", "2025-06-12 10:45:00", 11, 455.00, 461.00, 1.00, 2),
+        ("META", "2025-07-22 11:10:00", 8, 710.00, 718.50, 1.00, 2),
+        ("SOXL", "2025-08-14 10:05:00", 40, 28.50, 30.10, 1.20, 2),
+        ("AAPL", "2025-09-09 10:30:00", 18, 226.00, 223.20, 1.00, 5),
+        ("TSLA", "2025-10-16 11:20:00", 15, 420.00, 428.00, 1.00, 2),
+        ("NVDA", "2025-11-06 10:15:00", 9, 145.00, 151.40, 1.00, 2),
+        ("MSFT", "2025-12-18 13:40:00", 10, 480.00, 476.25, 1.00, 6),
+        ("AAPL", "2026-01-13 10:10:00", 24, 248.00, 252.80, 1.00, 2),
+        ("NVDA", "2026-02-10 10:40:00", 11, 178.00, 184.50, 1.00, 2),
+        ("TSLA", "2026-03-17 11:05:00", 16, 390.00, 384.20, 1.00, 6),
+        ("GOOGL", "2026-04-21 10:25:00", 13, 175.00, 179.60, 1.00, 2),
+        ("AMZN", "2026-05-12 10:55:00", 12, 220.00, 225.40, 1.00, 3),
+        ("MSFT", "2026-06-18 13:15:00", 9, 490.00, 486.10, 1.00, 6),
+        ("META", "2026-07-14 10:35:00", 7, 735.00, 744.00, 1.00, 2),
+        ("AAPL", "2026-08-11 11:00:00", 20, 255.00, 259.75, 1.00, 2),
+        ("NVDA", "2026-09-15 10:20:00", 10, 190.00, 186.40, 1.00, 5),
+        ("TSLA", "2026-10-01 10:15:00", 14, 410.00, 416.80, 1.00, 2),
+        ("MSFT", "2026-10-02 11:30:00", 8, 505.00, 509.50, 1.00, 2),
+    ]
+    source = 100
+    for symbol, when, quantity, entry, exit_price, commission, hold_hours in later_trips:
+        rows.extend(_sample_round_trip(source, symbol, when, quantity, entry, exit_price, commission, hold_hours))
         source += 2
     frame = pd.DataFrame(rows, columns=EXEC_COLUMNS)
     frame["trade_time"] = pd.to_datetime(frame["trade_time"])
@@ -3124,7 +3187,7 @@ def main() -> None:
         source = uploaded.name
     elif use_sample:
         executions = sample_executions()
-        notes = ["Sample data is synthetic. It is here so you can click through the dashboard before uploading a report."]
+        notes = ["Sample data is synthetic and runs from January 2024 through 2 October 2026. It is here so you can click through the dashboard before uploading a report."]
         source = "Sample data"
     else:
         show_page_title()
@@ -3293,6 +3356,9 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
     assert abs(match_fifo(flat_exec).closed.iloc[0]["net_pnl"] - 199) < 1e-6
 
     demo = sample_executions()
+    assert set(demo["trade_time"].dt.year) == {2024, 2025, 2026}
+    assert demo["trade_time"].min().date() == date(2024, 1, 16)
+    assert demo["trade_time"].max().date() == date(2026, 10, 2)
     demo_match = match_fifo(demo)
     revenge = revenge_trades(demo_match.closed, demo_match.openings)
     assert not revenge.empty
