@@ -839,20 +839,22 @@ def aggregate_fills(executions: pd.DataFrame) -> pd.DataFrame:
 def fx_multiplier(source: str, target: str, cad_per_usd: float) -> float | None:
     """Scale a source-currency amount into the target currency.
 
-    The quote is CAD per 1 USD. CAD values are divided by that rate to reach USD.
+    The quote is CAD per 1 USD. CAD display multiplies file dollars by that rate.
+    USD display divides by it, including when the file is already marked USD, so
+    the sidebar rate changes both currency choices.
     """
     origin = str(source or "USD").upper()
     destination = str(target or "USD").upper()
-    if origin == destination:
-        return 1.0
     if origin not in SUPPORTED_CURRENCIES or destination not in SUPPORTED_CURRENCIES:
         return None
     if cad_per_usd <= 0:
         return None
-    if origin == "CAD" and destination == "USD":
-        return 1.0 / cad_per_usd
-    if origin == "USD" and destination == "CAD":
+    if destination == "CAD":
+        if origin == "CAD":
+            return 1.0
         return cad_per_usd
+    if destination == "USD":
+        return 1.0 / cad_per_usd
     return None
 
 
@@ -2449,7 +2451,7 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
             index=1,
             horizontal=True,
             key="display-currency",
-            help="CAD rescales every dollar amount by the rate below. USD shows account dollars and does not use that rate.",
+            help="CAD multiplies file dollars by the rate below. USD divides by that same rate.",
         )
         cad_per_usd = st.number_input(
             "CAD per 1 USD",
@@ -2459,7 +2461,7 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
             step=0.01,
             format="%.2f",
             key="cad-per-usd",
-            help="Press Enter or the arrows. With CAD selected, every dollar amount is multiplied by this rate.",
+            help="Press Enter or the arrows. CAD multiplies by this rate. USD divides by it.",
         )
         fx_slot = st.empty()
         export_clicked = st.button(
@@ -2520,13 +2522,11 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
 
     latency = median_latency(raw_in_range)
     latency_note = f"  ·  median order-to-fill {format_latency(latency)}" if latency is not None else ""
+    rate_text = f"{float(cad_per_usd):.2f}"
     if currency == "CAD":
-        fx_slot.caption(f"CAD amounts use {float(cad_per_usd):.2f} per 1 USD.")
+        fx_slot.caption(f"CAD amounts multiply file dollars by {rate_text}.")
     else:
-        fx_slot.caption(
-            f"USD totals skip this rate. At {float(cad_per_usd):.2f}: "
-            f"{format_money(summary.net_pnl * float(cad_per_usd), 'CAD')}."
-        )
+        fx_slot.caption(f"USD amounts divide file dollars by {rate_text}.")
     st.caption(
         f"{source_label}  ·  exits {start_day.isoformat()} to {end_day.isoformat()}  ·  "
         f"{len(raw_in_range)} raw fills  ·  {len(aggregated_in_range)} aggregated trades  ·  "
@@ -3436,6 +3436,17 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
     assert abs(converted_pnl - (378 / 1.36)) < 1e-4
     back_to_cad, _ = convert_executions(converted, "CAD", 1.36)
     assert abs(back_to_cad.iloc[0]["price"] - 11.2) < 1e-4
+    usd_book = pd.DataFrame(
+        [
+            _exec("AAPL", "2024-01-02 09:30", "BUY", 10, 100, source_row=1, currency="USD"),
+            _exec("AAPL", "2024-01-02 10:30", "SELL", 10, 110, source_row=2, currency="USD"),
+        ]
+    )
+    usd_view, usd_notes = convert_executions(usd_book, "USD", 1.25)
+    assert abs(float(usd_view.iloc[0]["price"]) - 80) < 1e-6
+    assert any("USD" in note for note in usd_notes)
+    cad_from_usd, _ = convert_executions(usd_book, "CAD", 1.25)
+    assert abs(float(cad_from_usd.iloc[0]["price"]) - 125) < 1e-6
 
     loss_exit = pd.Timestamp("2024-08-02 10:00:00")
     later_loss = pd.Timestamp("2024-08-02 10:01:00")
