@@ -364,6 +364,13 @@ def convert_account_amount(amount: float, base: str, target: str, cad_per_usd: f
     return None
 
 
+def _show_rate_for_selected_currency() -> None:
+    """Keep the rate box matched to USD or CAD after the radio changes."""
+    currency = str(st.session_state.get("display-currency") or "CAD")
+    canonical = float(st.session_state.get("fx-cad-per-usd") or DEFAULT_CAD_PER_USD)
+    st.session_state["fx-rate-input"] = round(displayed_fx_quote(canonical, currency), 2)
+
+
 def resolve_account_currency(account_value: dict | None, executions: pd.DataFrame) -> dict | None:
     if not account_value or account_value.get("net_liquidation") is None:
         return None
@@ -2698,35 +2705,33 @@ def render_dashboard(
             help="Single stocks stay separate from leveraged and yield ETFs such as SOXL, SOXS, TQQQ, and MSTY. Options are detected from the asset class.",
         )
         st.markdown("**Currency**")
-        target_currency = st.radio(
-            "Show amounts in",
-            ["USD", "CAD"],
-            index=1,
-            horizontal=True,
-            key="display-currency",
-            help="USD shows how many US dollars buy 1 Canadian dollar, about 0.70. CAD shows how many Canadian dollars buy 1 US dollar, about 1.43.",
-        )
-        follow_market = st.checkbox(
-            "Live market rate",
-            value=True,
-            key="fx-follow-market",
-            help="Keeps the rate on the latest USD/CAD quote and updates the page when that quote moves. Turn this off to type a rate.",
-        )
         market_rate = cached_market_cad_per_usd()
         if "fx-cad-per-usd" not in st.session_state:
             st.session_state["fx-cad-per-usd"] = float(market_rate or DEFAULT_CAD_PER_USD)
-        rate_key = f"fx-rate-{target_currency}"
-        currency_changed = st.session_state.get("fx-rate-currency") != target_currency
-        st.session_state["fx-rate-currency"] = target_currency
+        if "display-currency" not in st.session_state:
+            st.session_state["display-currency"] = "CAD"
+        if "fx-follow-market" not in st.session_state:
+            st.session_state["fx-follow-market"] = True
+
+        target_currency = st.radio(
+            "Show amounts in",
+            ["USD", "CAD"],
+            horizontal=True,
+            key="display-currency",
+            on_change=_show_rate_for_selected_currency,
+            help="USD shows how many US dollars buy 1 Canadian dollar, about 0.70. CAD shows how many Canadian dollars buy 1 US dollar, about 1.43. This choice stays until you change it.",
+        )
+        follow_market = st.checkbox(
+            "Live market rate",
+            key="fx-follow-market",
+            help="Keeps the rate on the latest USD/CAD quote and updates the page when that quote moves. Turn this off to type a rate.",
+        )
         using_market = bool(follow_market and market_rate)
         if using_market:
             st.session_state["fx-cad-per-usd"] = float(market_rate)
-            st.session_state[rate_key] = round(displayed_fx_quote(float(market_rate), target_currency), 2)
-        elif rate_key not in st.session_state or currency_changed:
-            st.session_state[rate_key] = round(
-                displayed_fx_quote(float(st.session_state["fx-cad-per-usd"]), target_currency),
-                2,
-            )
+        shown_rate = round(displayed_fx_quote(float(st.session_state["fx-cad-per-usd"]), target_currency), 2)
+        if "fx-rate-input" not in st.session_state or (using_market and st.session_state.get("fx-rate-input") != shown_rate):
+            st.session_state["fx-rate-input"] = shown_rate
         rate_label = "USD per 1 CAD" if target_currency == "USD" else "CAD per 1 USD"
         typed_rate = st.number_input(
             rate_label,
@@ -2734,7 +2739,7 @@ def render_dashboard(
             max_value=3.00,
             step=0.01,
             format="%.2f",
-            key=rate_key,
+            key="fx-rate-input",
             disabled=using_market,
             help="With Live market rate on, this follows the quote. Turn it off, then press Enter or the arrows to use your own rate.",
         )
