@@ -186,7 +186,7 @@ def _fetch_windows(
         raise FlexServiceError(detail)
 
     merged = _merge_frames(frames)
-    merged.attrs["source_csv"] = _frame_to_csv(merged)
+    merged.attrs["source_csv"] = _combine_statement_text(chunks)
     merged.attrs["chunks"] = chunks
     merged.attrs["chunk_warnings"] = warnings
     merged.attrs["chunk_count"] = len(windows)
@@ -315,6 +315,15 @@ def _merge_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return combined.reset_index(drop=True)
 
 
+def _combine_statement_text(chunks: list[dict]) -> str:
+    """Keep each downloaded statement, including sections other than trades."""
+    parts = [str(chunk.get("csv") or "").strip() for chunk in chunks]
+    parts = [part for part in parts if part]
+    if not parts:
+        return ""
+    return "\n".join(parts) + "\n"
+
+
 def _frame_to_csv(frame: pd.DataFrame) -> str:
     export = frame.copy()
     if "Date/Time" in export.columns:
@@ -369,10 +378,16 @@ def statement_from_response(payload: str) -> tuple[str | None, str | None]:
 
 def _frame_from_csv(csv_text: str) -> pd.DataFrame:
     # Imported here so this module can load before app.py finishes importing it.
-    from app import _choose_delimiter, read_flat_frame
+    from app import _choose_delimiter, parse_section_rows, read_flat_frame
 
+    delimiter = _choose_delimiter(csv_text)
+    section_rows = parse_section_rows(csv_text, delimiter)
+    if section_rows:
+        frame = pd.DataFrame(section_rows).drop(columns=["_section"], errors="ignore")
+        frame.columns = [str(column).strip() for column in frame.columns]
+        return frame
     try:
-        frame = read_flat_frame(csv_text, _choose_delimiter(csv_text))
+        frame = read_flat_frame(csv_text, delimiter)
     except Exception:
         try:
             frame = pd.read_csv(io.StringIO(csv_text), dtype=str, engine="python", on_bad_lines="skip")

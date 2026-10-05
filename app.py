@@ -236,8 +236,8 @@ def _is_sectioned(rows: list[list[str]]) -> bool:
     return header_hits > 0
 
 
-def parse_section_rows(text: str, delimiter: str) -> list[dict]:
-    """Pull execution rows out of an Interactive Brokers multi-section CSV."""
+def parse_all_section_rows(text: str, delimiter: str) -> list[dict]:
+    """Read every data row from an Interactive Brokers multi-section CSV."""
     rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
     if not _is_sectioned(rows):
         return []
@@ -253,7 +253,7 @@ def parse_section_rows(text: str, delimiter: str) -> list[dict]:
             section = _section_key(row[0])
             headers = [cell.strip() for cell in row[2:]]
             continue
-        if kind != "data" or section not in TRADE_SECTIONS or not headers:
+        if kind != "data" or not section or not headers:
             continue
         values = row[2:]
         if len(values) < len(headers):
@@ -262,6 +262,111 @@ def parse_section_rows(text: str, delimiter: str) -> list[dict]:
         record["_section"] = section
         extracted.append(record)
     return extracted
+
+
+def parse_section_rows(text: str, delimiter: str) -> list[dict]:
+    """Pull execution rows out of an Interactive Brokers multi-section CSV."""
+    return [row for row in parse_all_section_rows(text, delimiter) if row.get("_section") in TRADE_SECTIONS]
+
+
+def _is_nav_section(section: str) -> bool:
+    key = _section_key(section)
+    return key.startswith("netassetvalue") or key.startswith("equitysummary") or "navinbase" in key
+
+
+def _latest_nav_rows(rows: list[dict], date_col: str | None) -> tuple[list[dict], str | None]:
+    if not date_col:
+        return rows, None
+    dated: list[tuple[date, dict]] = []
+    for row in rows:
+        stamp = parse_datetime(row.get(date_col))
+        if pd.isna(stamp):
+            continue
+        dated.append((stamp.date(), row))
+    if not dated:
+        return rows, None
+    latest = max(day for day, _row in dated)
+    return [row for day, row in dated if day == latest], latest.isoformat()
+
+
+def account_value_from_text(text: str, delimiter: str, decimal_comma: bool = False) -> dict | None:
+    """Latest net liquidation value and cash from a Net Asset Value section."""
+    rows = [row for row in parse_all_section_rows(text, delimiter) if _is_nav_section(str(row.get("_section") or ""))]
+    if not rows:
+        return None
+    columns = list(rows[0].keys())
+    asset_col = find_col(columns, ["Asset Class", "AssetClass", "Asset Category"])
+    total_col = find_col(
+        columns,
+        ["Total", "Net Liquidation Value", "NetLiquidationValue", "NAV", "Current Total", "Ending Value", "EndingValue"],
+    )
+    cash_col = find_col(columns, ["Cash", "Ending Cash", "CashBalance"])
+    date_col = find_col(columns, ["ReportDate", "Report Date", "Date"])
+    currency_col = find_col(columns, ["Currency", "CurrencyPrimary", "BaseCurrency", "Base Currency"])
+    chosen, report_date = _latest_nav_rows(rows, date_col)
+    currency = ""
+    if currency_col:
+        currency = str(chosen[-1].get(currency_col) or "").strip().upper()
+        if currency in {"", "NAN", "NONE", "BASE"}:
+            currency = ""
+
+    net_liquidation = None
+    cash = None
+    if asset_col:
+        value_col = total_col or find_col(columns, ["Current Total", "Total", "CurrentTotal"])
+        for row in chosen:
+            label = _key(row.get(asset_col))
+            amount = parse_number(row.get(value_col), decimal_comma) if value_col else None
+            if label in {"total", "nav", "netliquidationvalue", "netassetvalue"}:
+                net_liquidation = amount
+            elif label == "cash":
+                cash = amount
+    else:
+        row = chosen[-1]
+        if total_col:
+            net_liquidation = parse_number(row.get(total_col), decimal_comma)
+        if cash_col:
+            cash = parse_number(row.get(cash_col), decimal_comma)
+    if net_liquidation is None:
+        return None
+    return {
+        "net_liquidation": float(net_liquidation),
+        "cash": None if cash is None else float(cash),
+        "report_date": report_date,
+        "currency": currency,
+    }
+
+
+def convert_account_amount(amount: float, base: str, target: str, cad_per_usd: float) -> float | None:
+    """Convert an account balance only when the sidebar currency differs from the account currency."""
+    origin = str(base or "USD").upper()
+    destination = str(target or "USD").upper()
+    if origin not in SUPPORTED_CURRENCIES or destination not in SUPPORTED_CURRENCIES:
+        return None
+    if origin == destination:
+        return float(amount)
+    if cad_per_usd <= 0:
+        return None
+    if origin == "USD" and destination == "CAD":
+        return float(amount) * float(cad_per_usd)
+    if origin == "CAD" and destination == "USD":
+        return float(amount) / float(cad_per_usd)
+    return None
+
+
+def resolve_account_currency(account_value: dict | None, executions: pd.DataFrame) -> dict | None:
+    if not account_value or account_value.get("net_liquidation") is None:
+        return None
+    resolved = dict(account_value)
+    if str(resolved.get("currency") or "").strip():
+        return resolved
+    currencies = {
+        str(value).strip().upper()
+        for value in executions.get("currency", pd.Series(dtype=str)).dropna().tolist()
+        if str(value).strip() and str(value).strip().upper() not in {"NAN", "NONE"}
+    }
+    resolved["currency"] = next(iter(currencies)) if len(currencies) == 1 else "USD"
+    return resolved
 
 
 HEADER_KEYS = {
@@ -2506,7 +2611,42 @@ def render_empty_state() -> None:
         )
 
 
-def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: str) -> None:
+def render_account_value(account_value: dict | None, currency: str, cad_per_usd: float, source_label: str) -> None:
+    """Show the Flex query account balance above the closed-trade stats."""
+    if not account_value or account_value.get("net_liquidation") is None:
+        if source_label == "IBKR Flex Query":
+            st.info(
+                "Net liquidation value is not in this download yet. Click Sync with IBKR once so the updated query, including Net Asset Value (NAV) in Base, is loaded."
+            )
+        return
+    base = str(account_value.get("currency") or "USD")
+    as_of = account_value.get("report_date") or "the latest statement date"
+    net_liquidation = convert_account_amount(float(account_value["net_liquidation"]), base, currency, cad_per_usd)
+    if net_liquidation is None:
+        return
+    columns = st.columns(4)
+    columns[0].metric(
+        "Net liquidation value",
+        format_money(net_liquidation, currency),
+        help=f"Account value from the Flex query as of {as_of}. This is the margin-account balance, separate from closed-trade profit.",
+    )
+    if account_value.get("cash") is not None:
+        cash = convert_account_amount(float(account_value["cash"]), base, currency, cad_per_usd)
+        if cash is not None:
+            columns[1].metric(
+                "Cash",
+                format_money(cash, currency),
+                help=f"Cash from the same NAV section as of {as_of}.",
+            )
+    st.caption(f"Account value as of {as_of}, from Net Asset Value (NAV) in Base. Statement currency {base}.")
+
+
+def render_dashboard(
+    executions: pd.DataFrame,
+    notes: list[str],
+    source_label: str,
+    account_value: dict | None = None,
+) -> None:
     symbols = sorted(executions["symbol"].unique().tolist())
     min_day = executions["trade_time"].min().date()
     max_day = executions["trade_time"].max().date()
@@ -2659,6 +2799,8 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
         st.info("⚠️ Outlier Filter Active: Excluding AMD and SOXL")
     if set(selected_types) != set(ASSET_TYPE_OPTIONS):
         st.caption("Asset type: " + ", ".join(selected_types) + ".")
+
+    render_account_value(resolve_account_currency(account_value, executions), currency, float(cad_per_usd), source_label)
 
     metric_row_1 = st.columns(4)
     metric_row_1[0].metric(
@@ -3073,13 +3215,23 @@ def flex_sync_caption(period: str, picked, today: date | None = None) -> str:
     return f"{label} · {window_text} · {requests}"
 
 
-def load_saved_flex(directory: Path = FLEX_DIR) -> tuple[pd.DataFrame, list[str]] | None:
+def account_value_from_bytes(name: str, data: bytes) -> dict | None:
+    text = decode_upload(name, data)
+    delimiter = _choose_delimiter(text)
+    return account_value_from_text(text, delimiter, detect_decimal_comma(text, delimiter))
+
+
+def load_saved_flex(directory: Path = FLEX_DIR) -> tuple[pd.DataFrame, list[str], dict | None] | None:
     path = directory / "combined.csv"
     if not path.is_file():
         return None
-    executions, notes = load_executions(path.name, path.read_bytes())
+    data = path.read_bytes()
+    executions, notes = load_executions(path.name, data)
+    account_value = account_value_from_bytes(path.name, data)
     notes = ["Loaded the saved IBKR sync from data/flex. Sync again to replace those files."] + list(notes)
-    return executions, notes
+    if account_value and account_value.get("report_date"):
+        notes.append(f"Net liquidation value is from the statement dated {account_value['report_date']}.")
+    return executions, notes, account_value
 
 
 @st.dialog("How to make a Flex Query file", width="large")
@@ -3123,6 +3275,7 @@ def show_flex_query_guide() -> None:
 - Level Of Detail
 
 3. Scroll down and click **Save**.
+4. Also select **Net Asset Value (NAV) in Base**. Keep Report Date, Cash, and Total. That section is the account's net liquidation value.
 
 **Step 4. Export each year**
 
@@ -3177,10 +3330,11 @@ def main() -> None:
         st.session_state.flex_autoload_done = True
         loaded = load_saved_flex()
         if loaded is not None:
-            loaded_executions, loaded_notes = loaded
+            loaded_executions, loaded_notes, loaded_value = loaded
             st.session_state.ibkr_bundle = {
                 "executions": loaded_executions,
                 "notes": loaded_notes,
+                "account_value": loaded_value,
             }
             st.session_state.prefer_ibkr = True
 
@@ -3259,13 +3413,17 @@ def main() -> None:
                         downloaded = fetch_ibkr_trades(start=sync_start, end=sync_end, progress=on_chunk)
                     csv_text = downloaded.attrs.get("source_csv", "")
                     synced_executions, synced_notes = load_executions("ibkr_flex.csv", csv_text.encode("utf-8"))
+                    account_value = account_value_from_bytes("ibkr_flex.csv", csv_text.encode("utf-8"))
                     for warning in downloaded.attrs.get("chunk_warnings") or []:
                         synced_notes.append(warning)
                     written = save_flex_sync(csv_text, list(downloaded.attrs.get("chunks") or []))
                     synced_notes.append("Saved this sync in data/flex. The next sync replaces those files.")
+                    if account_value and account_value.get("report_date"):
+                        synced_notes.append(f"Net liquidation value is from the statement dated {account_value['report_date']}.")
                     st.session_state.ibkr_bundle = {
                         "executions": synced_executions,
                         "notes": synced_notes,
+                        "account_value": account_value,
                     }
                     st.session_state.prefer_ibkr = True
                     st.session_state.ibkr_error = ""
@@ -3293,14 +3451,18 @@ def main() -> None:
     st.session_state.sample_was_on = use_sample
 
     bundle = st.session_state.ibkr_bundle
+    account_value = None
     if st.session_state.prefer_ibkr and bundle:
         executions = bundle["executions"]
         notes = list(bundle["notes"])
+        account_value = bundle.get("account_value")
         source = "IBKR Flex Query"
     elif uploaded is not None:
         try:
-            executions, notes_tuple = cached_executions(uploaded.name, uploaded.getvalue())
+            upload_bytes = uploaded.getvalue()
+            executions, notes_tuple = cached_executions(uploaded.name, upload_bytes)
             notes = list(notes_tuple)
+            account_value = account_value_from_bytes(uploaded.name, upload_bytes)
         except Exception as exc:
             show_page_title()
             st.error(f"Could not read that file. {exc}")
@@ -3322,7 +3484,7 @@ def main() -> None:
             st.write(note)
         return
 
-    render_dashboard(executions, notes, source)
+    render_dashboard(executions, notes, source, account_value)
 
 
 # ---------------------------------------------------------------------------
@@ -3568,6 +3730,41 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
     assert any("USD" in note for note in usd_notes)
     cad_from_usd, _ = convert_executions(usd_book, "CAD", 1.25)
     assert abs(float(cad_from_usd.iloc[0]["price"]) - 125) < 1e-6
+    nav_text = "\n".join(
+        [
+            "Trades,Header,Symbol,DateTime,Quantity,TradePrice,Proceeds,IBCommission,Buy/Sell,CurrencyPrimary,AssetClass",
+            "Trades,Data,AAPL,2024-01-02 09:30:00,10,100,-1000,-1,BUY,USD,STK",
+            "Trades,Data,AAPL,2024-01-02 10:30:00,-10,110,1100,-1,SELL,USD,STK",
+            "Net Asset Value (NAV) in Base,Header,ReportDate,Cash,Stock,Total",
+            "Net Asset Value (NAV) in Base,Data,20261002,9008.00,0,9008.00",
+            "Net Asset Value (NAV) in Base,Data,20261003,8500.00,600.50,9100.50",
+        ]
+    )
+    nav_book, _nav_notes = load_executions("nav.csv", nav_text.encode("utf-8"))
+    assert len(nav_book) == 2
+    nav_value = account_value_from_text(nav_text, ",")
+    assert nav_value["report_date"] == "2026-10-03"
+    assert abs(nav_value["net_liquidation"] - 9100.50) < 1e-6
+    assert abs(nav_value["cash"] - 8500.00) < 1e-6
+    class_text = "\n".join(
+        [
+            "Net Asset Value (NAV) in Base,Header,Asset Class,Current Total",
+            "Net Asset Value (NAV) in Base,Data,Cash,9008",
+            "Net Asset Value (NAV) in Base,Data,Stock,100",
+            "Net Asset Value (NAV) in Base,Data,Total,9108",
+        ]
+    )
+    class_value = account_value_from_text(class_text, ",")
+    assert abs(class_value["net_liquidation"] - 9108) < 1e-6
+    assert abs(class_value["cash"] - 9008) < 1e-6
+    assert account_value_from_text("Symbol,Quantity\nAAPL,1\n", ",") is None
+    assert abs(convert_account_amount(9008, "USD", "USD", 1.43) - 9008) < 1e-6
+    assert abs(convert_account_amount(9008, "USD", "CAD", 1.43) - (9008 * 1.43)) < 1e-6
+    from ibkr_service import _combine_statement_text
+
+    combined_statement = _combine_statement_text([{"csv": nav_text}, {"csv": "Trades,Header,Symbol\nTrades,Data,MSFT\n"}])
+    assert "9100.50" in combined_statement
+    assert "MSFT" in combined_statement
     assert abs(displayed_fx_quote(1.43, "CAD") - 1.43) < 1e-9
     assert round(displayed_fx_quote(1.43, "USD"), 2) == 0.70
     assert abs(canonical_cad_per_usd(0.70, "USD") - (1.0 / 0.70)) < 1e-9
