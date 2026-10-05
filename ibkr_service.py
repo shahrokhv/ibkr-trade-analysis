@@ -82,17 +82,26 @@ def fetch_ibkr_trades(
     query_id: str = DEFAULT_QUERY_ID,
     years: int = DEFAULT_YEARS,
     progress: ProgressCallback | None = None,
+    start: date | None = None,
+    end: date | None = None,
 ) -> pd.DataFrame:
-    """Download ``years`` of trades in 365-day windows and return one DataFrame.
+    """Download trades and return one DataFrame.
 
-    The merged CSV is kept on ``frame.attrs["source_csv"]`` so the app can run
-    it through the same cleaner used for an uploaded file.
+    Pass ``start`` and ``end`` to sync that inclusive range. Otherwise the last
+    ``years`` are downloaded. IBKR accepts at most 365 days per request, so a
+    longer range is split into weekday windows. The merged CSV is kept on
+    ``frame.attrs["source_csv"]`` so the app can run it through the same cleaner
+    used for an uploaded file.
     """
     resolved = (token or flex_token()).strip()
     if hosted_publicly():
         raise FlexServiceError("IBKR sync is turned off on the public site.")
     if not resolved:
         raise FlexServiceError("Set IBKR_FLEX_TOKEN, or save the token in .ibkr_token, before syncing.")
+    if start is not None or end is not None:
+        if start is None or end is None:
+            raise FlexServiceError("A Flex date override needs both a start date and an end date.")
+        return fetch_date_range(resolved, query_id, start, end, progress=progress)
     return fetch_multi_year_history(resolved, query_id, years=years, progress=progress)
 
 
@@ -116,7 +125,31 @@ def fetch_multi_year_history(
     progress: ProgressCallback | None = None,
 ) -> pd.DataFrame:
     """Fetch history in annual chunks and return one de-duplicated DataFrame."""
-    windows = year_windows(years)
+    return _fetch_windows(token, query_id, year_windows(years), progress)
+
+
+def fetch_date_range(
+    token: str,
+    query_id: str,
+    start: date,
+    end: date,
+    progress: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    """Fetch one inclusive date range, split into 365-day windows when needed."""
+    if end < start:
+        raise FlexServiceError("The end date must be on or after the start date.")
+    windows = date_windows(start, end)
+    if not windows:
+        raise FlexServiceError("That date range has no weekdays. IBKR rejects a weekend-only request.")
+    return _fetch_windows(token, query_id, windows, progress)
+
+
+def _fetch_windows(
+    token: str,
+    query_id: str,
+    windows: list[tuple[date, date]],
+    progress: ProgressCallback | None = None,
+) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     chunks: list[dict[str, str]] = []
     warnings: list[str] = []
@@ -173,7 +206,19 @@ def year_windows(years: int = DEFAULT_YEARS, today: date | None = None) -> list[
         start = end.replace(year=end.year - years)
     except ValueError:
         start = end.replace(year=end.year - years, day=28)
+    return date_windows(start, end)
+
+
+def date_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """Split an inclusive range into weekday windows of at most 365 days.
+
+    A Saturday or Sunday endpoint is moved to the nearest weekday inside the
+    range, because IBKR has rejected weekend endpoints with error 1025.
+    """
     start = _next_weekday(start)
+    end = _previous_weekday(end)
+    if start > end:
+        return []
     windows: list[tuple[date, date]] = []
     cursor = start
     while cursor <= end:

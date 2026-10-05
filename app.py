@@ -17,7 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from ibkr_service import DEFAULT_QUERY_ID, FlexServiceError, fetch_ibkr_trades, hosted_publicly
+from ibkr_service import DEFAULT_QUERY_ID, FlexServiceError, date_windows, fetch_ibkr_trades, hosted_publicly, year_windows
 
 EPS = 1e-8
 REVENGE_WINDOW = timedelta(minutes=10)
@@ -1454,6 +1454,239 @@ def _in_date_range(stamps: pd.Series, start: date, end: date) -> pd.Series:
     return (days >= start) & (days <= end)
 
 
+EXIT_DATE_PRESETS = (
+    "All dates",
+    "Year to date",
+    "This month",
+    "Last month",
+    "This quarter",
+    "Last quarter",
+    "Last 7 days",
+    "Last 30 days",
+    "Last 90 days",
+    "Last 6 months",
+    "Last 12 months",
+    "Calendar year",
+    "Quarter",
+    "Month",
+    "Custom range",
+)
+_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
+def _month_bounds(year: int, month: int) -> tuple[date, date]:
+    start = date(year, month, 1)
+    if month == 12:
+        end = date(year, 12, 31)
+    else:
+        end = date(year, month + 1, 1) - timedelta(days=1)
+    return start, end
+
+
+def _quarter_bounds(year: int, quarter: int) -> tuple[date, date]:
+    if quarter not in {1, 2, 3, 4}:
+        raise ValueError("Quarter must be 1, 2, 3, or 4.")
+    start_month = 3 * (quarter - 1) + 1
+    return date(year, start_month, 1), _month_bounds(year, start_month + 2)[1]
+
+
+def _shift_months(day: date, months: int) -> date:
+    month_index = day.month - 1 + months
+    year = day.year + month_index // 12
+    month = month_index % 12 + 1
+    last_day = _month_bounds(year, month)[1].day
+    return date(year, month, min(day.day, last_day))
+
+
+def exit_window_bounds(
+    preset: str,
+    data_start: date,
+    data_end: date,
+    today: date | None = None,
+    year: int | None = None,
+    quarter: int | None = None,
+    month: int | None = None,
+    custom_start: date | None = None,
+    custom_end: date | None = None,
+) -> tuple[date, date]:
+    """Inclusive exit-date window for a preset.
+
+    Relative presets end on ``today``. A chosen year, quarter, or month uses
+    that whole calendar period.
+    """
+    today = today or date.today()
+    if preset == "All dates":
+        return data_start, data_end
+    if preset == "Year to date":
+        return date(today.year, 1, 1), today
+    if preset == "This month":
+        return date(today.year, today.month, 1), today
+    if preset == "Last month":
+        if today.month == 1:
+            return _month_bounds(today.year - 1, 12)
+        return _month_bounds(today.year, today.month - 1)
+    quarter_now = (today.month - 1) // 3 + 1
+    if preset == "This quarter":
+        start, _end = _quarter_bounds(today.year, quarter_now)
+        return start, today
+    if preset == "Last quarter":
+        if quarter_now == 1:
+            return _quarter_bounds(today.year - 1, 4)
+        return _quarter_bounds(today.year, quarter_now - 1)
+    if preset == "Last 7 days":
+        return today - timedelta(days=6), today
+    if preset == "Last 30 days":
+        return today - timedelta(days=29), today
+    if preset == "Last 90 days":
+        return today - timedelta(days=89), today
+    if preset == "Last 6 months":
+        return _shift_months(today, -6), today
+    if preset == "Last 12 months":
+        return _shift_months(today, -12), today
+    if preset == "Calendar year":
+        if year is None:
+            raise ValueError("Choose a year.")
+        return date(year, 1, 1), date(year, 12, 31)
+    if preset == "Quarter":
+        if year is None or quarter is None:
+            raise ValueError("Choose a year and a quarter.")
+        return _quarter_bounds(year, quarter)
+    if preset == "Month":
+        if year is None or month is None:
+            raise ValueError("Choose a year and a month.")
+        return _month_bounds(year, month)
+    if preset == "Custom range":
+        if custom_start is None or custom_end is None:
+            raise ValueError("Select both a start date and an end date.")
+        if custom_end < custom_start:
+            raise ValueError("The end date must be on or after the start date.")
+        return custom_start, custom_end
+    raise ValueError(f"Unknown exit date filter: {preset}")
+
+
+def render_exit_date_filter(min_day: date, max_day: date, filter_key: str) -> tuple[date, date] | None:
+    """Draw the exit-date filter and return the inclusive window, or None if a custom range is incomplete."""
+    preset_key = f"exit-preset-{filter_key}"
+    range_key = f"exit-range-{filter_key}"
+    applied_key = f"exit-applied-{filter_key}"
+    preset = st.pills(
+        "Exit dates",
+        EXIT_DATE_PRESETS,
+        default="All dates",
+        key=preset_key,
+        help="Closed trades stay when the exit falls in this window. FIFO still uses earlier fills, so that exit keeps its original entry.",
+        width="stretch",
+    )
+    if preset not in EXIT_DATE_PRESETS:
+        preset = "All dates"
+
+    years = list(range(max_day.year, min_day.year - 1, -1))
+    year = max_day.year
+    quarter = (max_day.month - 1) // 3 + 1
+    month = max_day.month
+    if preset in {"Calendar year", "Quarter", "Month"}:
+        year_col, part_col = st.columns(2)
+        with year_col:
+            year = int(st.selectbox("Year", years, key=f"exit-year-{filter_key}"))
+        if preset == "Quarter":
+            with part_col:
+                quarter_label = st.selectbox(
+                    "Quarter",
+                    ["Q1", "Q2", "Q3", "Q4"],
+                    index=quarter - 1,
+                    key=f"exit-quarter-{filter_key}",
+                )
+            quarter = int(str(quarter_label)[1])
+        elif preset == "Month":
+            with part_col:
+                month_label = st.selectbox(
+                    "Month",
+                    _MONTH_NAMES,
+                    index=month - 1,
+                    key=f"exit-month-{filter_key}",
+                )
+            month = _MONTH_NAMES.index(str(month_label)) + 1
+
+    if preset == "Custom range":
+        signature = ("Custom range",)
+    else:
+        signature = (preset, year, quarter if preset == "Quarter" else 0, month if preset == "Month" else 0)
+        if st.session_state.get(applied_key) != signature or range_key not in st.session_state:
+            try:
+                st.session_state[range_key] = exit_window_bounds(
+                    preset,
+                    min_day,
+                    max_day,
+                    year=year,
+                    quarter=quarter,
+                    month=month,
+                )
+            except ValueError as exc:
+                st.warning(str(exc))
+                return None
+            st.session_state[applied_key] = signature
+
+    floor = date(min_day.year, 1, 1)
+    ceiling = date(max(max_day.year, date.today().year), 12, 31)
+    stored = st.session_state.get(range_key, (min_day, max_day))
+    if not isinstance(stored, (list, tuple)) or len(stored) != 2:
+        stored = (min_day, max_day)
+    start_stored = min(max(stored[0], floor), ceiling)
+    end_stored = min(max(stored[1], floor), ceiling)
+    if end_stored < start_stored:
+        end_stored = start_stored
+    st.session_state[range_key] = (start_stored, end_stored)
+
+    range_col, _rest = st.columns([1.35, 2])
+    with range_col:
+        picked = st.date_input(
+            "Exit date range",
+            min_value=floor,
+            max_value=ceiling,
+            key=range_key,
+            help="This range is the filter. A preset fills it in. Changing either date keeps your own range.",
+        )
+    if not isinstance(picked, (list, tuple)) or len(picked) != 2:
+        st.warning("Select both a start date and an end date.")
+        return None
+    start_day, end_day = picked
+    if end_day < start_day:
+        st.warning("The end date must be on or after the start date.")
+        return None
+    if preset != "Custom range":
+        expected = exit_window_bounds(
+            preset,
+            min_day,
+            max_day,
+            year=year,
+            quarter=quarter,
+            month=month,
+        )
+        if (start_day, end_day) != expected:
+            st.session_state[preset_key] = "Custom range"
+            st.session_state[applied_key] = ("Custom range",)
+            st.rerun()
+    st.caption(f"Showing exits from {start_day.isoformat()} through {end_day.isoformat()}.")
+    if end_day < min_day or start_day > max_day:
+        st.info(
+            f"No exits in this file fall in that window. The file runs {min_day.isoformat()} to {max_day.isoformat()}."
+        )
+    return start_day, end_day
+
+
 def cumulative_figure(closed: pd.DataFrame, currency: str) -> go.Figure | None:
     if closed is None or closed.empty:
         return None
@@ -2130,16 +2363,7 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
     asset_classes = sorted({_cell_text(value) for value in executions["asset_category"].tolist() if _cell_text(value)})
 
     show_page_title()
-    date_col, _rest = st.columns([1, 2])
-    with date_col:
-        picked = st.date_input(
-            "Exit date range",
-            value=(min_day, max_day),
-            min_value=min_day,
-            max_value=max_day,
-            key=f"dates-{filter_key}",
-            help="FIFO still uses fills outside this range so a later exit keeps its original entry.",
-        )
+    exit_window = render_exit_date_filter(min_day, max_day, filter_key)
 
     with st.sidebar:
         st.markdown("**Filters**")
@@ -2182,11 +2406,9 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
         )
         st.caption(source_label)
 
-    if isinstance(picked, (list, tuple)) and len(picked) == 2:
-        start_day, end_day = picked
-    else:
-        st.warning("Select both a start date and an end date.")
+    if exit_window is None:
         return
+    start_day, end_day = exit_window
     if not selected:
         st.warning("Select at least one ticker.")
         return
@@ -2243,7 +2465,8 @@ def render_dashboard(executions: pd.DataFrame, notes: list[str], source_label: s
             f"{format_money(summary.net_pnl * float(cad_per_usd), 'CAD')}."
         )
     st.caption(
-        f"{source_label}  ·  {len(raw_in_range)} raw fills  ·  {len(aggregated_in_range)} aggregated trades  ·  "
+        f"{source_label}  ·  exits {start_day.isoformat()} to {end_day.isoformat()}  ·  "
+        f"{len(raw_in_range)} raw fills  ·  {len(aggregated_in_range)} aggregated trades  ·  "
         f"{summary.closed_count} closed trades  ·  {len(matched.open_lots)} open lots  ·  "
         f"shown in {currency} at {float(cad_per_usd):.2f} CAD per 1 USD  ·  FIFO, net of IB commission{latency_note}"
     )
@@ -2615,6 +2838,57 @@ def save_flex_sync(combined_csv: str, chunks: list[dict], directory: Path = FLEX
     return written
 
 
+def flex_year_options(today: date | None = None) -> list[str]:
+    """Calendar years, newest first, plus the rolling history and a custom range."""
+    current = (today or date.today()).year
+    return [str(year) for year in range(current, 2009, -1)] + ["Last 5 years", "Custom dates"]
+
+
+def planned_flex_sync(period: str, picked, today: date | None = None) -> tuple[date | None, date | None]:
+    """Return the inclusive dates to request from IBKR.
+
+    ``(None, None)`` means the rolling five-year download. A calendar year runs
+    from January 1 through December 31, or through today when that year is still open.
+    """
+    today = today or date.today()
+    if period == "Last 5 years":
+        return None, None
+    if period == "Custom dates":
+        if not isinstance(picked, (list, tuple)) or len(picked) != 2:
+            raise ValueError("Select both a start date and an end date, then sync.")
+        start, end = picked
+        if end < start:
+            raise ValueError("The end date must be on or after the start date.")
+        if start > today or end > today:
+            raise ValueError("IBKR can only return dates through today.")
+        return start, end
+    year = int(period)
+    start = date(year, 1, 1)
+    end = min(date(year, 12, 31), today)
+    if start > end:
+        raise ValueError("That year has not started.")
+    return start, end
+
+
+def flex_sync_caption(period: str, picked, today: date | None = None) -> str:
+    """Describe the weekday windows a sync would send to IBKR."""
+    start, end = planned_flex_sync(period, picked, today)
+    if start is None or end is None:
+        windows = year_windows(today=today)
+        label = "Last 5 years"
+    else:
+        windows = date_windows(start, end)
+        label = period if period not in {"Custom dates", "Last 5 years"} else f"{start.isoformat()} to {end.isoformat()}"
+    if not windows:
+        return f"{label} · no weekdays in that range"
+    first, last = windows[0][0], windows[-1][1]
+    requests = "1 request" if len(windows) == 1 else f"{len(windows)} requests"
+    window_text = f"{first.isoformat()} to {last.isoformat()}"
+    if label == window_text:
+        return f"{window_text} · {requests}"
+    return f"{label} · {window_text} · {requests}"
+
+
 def load_saved_flex(directory: Path = FLEX_DIR) -> tuple[pd.DataFrame, list[str]] | None:
     path = directory / "combined.csv"
     if not path.is_file():
@@ -2730,13 +3004,35 @@ def main() -> None:
         st.markdown("**Data**")
         local_app = running_locally()
         sync_clicked = False
+        sync_period = "Last 5 years"
+        sync_picked = None
         if local_app:
+            sync_period = st.selectbox(
+                "Year",
+                options=flex_year_options(),
+                index=0,
+                key="ibkr-sync-period",
+                help="Sync one calendar year, the last 5 years, or a custom date range. A range longer than 365 days is downloaded in chunks.",
+            )
+            if sync_period == "Custom dates":
+                sync_picked = st.date_input(
+                    "Date range",
+                    value=(date(date.today().year, 1, 1), date.today()),
+                    min_value=date(2010, 1, 1),
+                    max_value=date.today(),
+                    key="ibkr-sync-dates",
+                    help="Choose the start and end date, then click Sync.",
+                )
             sync_clicked = st.button("🔄 Sync with IBKR (Live Flex Query)", use_container_width=True)
             saved = (FLEX_DIR / "combined.csv").is_file()
             synced_count = 0
             if st.session_state.prefer_ibkr and st.session_state.ibkr_bundle:
                 synced_count = len(st.session_state.ibkr_bundle["executions"])
-            sync_bits = [f"Query {DEFAULT_QUERY_ID}", "5 years"]
+            try:
+                period_note = flex_sync_caption(sync_period, sync_picked)
+            except ValueError as exc:
+                period_note = str(exc)
+            sync_bits = [f"Query {DEFAULT_QUERY_ID}", period_note]
             if saved:
                 sync_bits.append("loads from data/flex")
             if synced_count:
@@ -2754,31 +3050,48 @@ def main() -> None:
         use_sample = st.toggle("Use sample data", value=False)
 
     if sync_clicked and running_locally():
-        with st.status("Syncing 5 years of IBKR trades in 365-day chunks.", expanded=True) as status:
-            def on_chunk(index: int, total: int, start, end) -> None:
-                status.write(f"Chunk {index} of {total}: {start.isoformat()} to {end.isoformat()}")
+        try:
+            sync_start, sync_end = planned_flex_sync(sync_period, sync_picked)
+        except ValueError as exc:
+            st.session_state.ibkr_error = str(exc)
+            sync_start = sync_end = None
+            sync_ready = False
+        else:
+            sync_ready = True
+            st.session_state.ibkr_error = ""
+        if sync_ready:
+            if sync_start is None or sync_end is None:
+                status_label = "Syncing 5 years of IBKR trades in 365-day chunks."
+            else:
+                status_label = f"Syncing IBKR trades from {sync_start.isoformat()} to {sync_end.isoformat()}."
+            with st.status(status_label, expanded=True) as status:
+                def on_chunk(index: int, total: int, start, end) -> None:
+                    status.write(f"Chunk {index} of {total}: {start.isoformat()} to {end.isoformat()}")
 
-            try:
-                downloaded = fetch_ibkr_trades(progress=on_chunk)
-                csv_text = downloaded.attrs.get("source_csv", "")
-                synced_executions, synced_notes = load_executions("ibkr_flex.csv", csv_text.encode("utf-8"))
-                for warning in downloaded.attrs.get("chunk_warnings") or []:
-                    synced_notes.append(warning)
-                written = save_flex_sync(csv_text, list(downloaded.attrs.get("chunks") or []))
-                synced_notes.append("Saved this sync in data/flex. The next sync replaces those files.")
-                st.session_state.ibkr_bundle = {
-                    "executions": synced_executions,
-                    "notes": synced_notes,
-                }
-                st.session_state.prefer_ibkr = True
-                st.session_state.ibkr_error = ""
-                status.write("Saved " + ", ".join(written))
-                status.update(label=f"Synced {len(synced_executions):,} executions", state="complete")
-            except (FlexServiceError, Exception) as exc:
-                message = str(exc)
-                st.session_state.ibkr_error = message
-                status.write(message)
-                status.update(label="Flex sync failed", state="error")
+                try:
+                    if sync_start is None or sync_end is None:
+                        downloaded = fetch_ibkr_trades(progress=on_chunk)
+                    else:
+                        downloaded = fetch_ibkr_trades(start=sync_start, end=sync_end, progress=on_chunk)
+                    csv_text = downloaded.attrs.get("source_csv", "")
+                    synced_executions, synced_notes = load_executions("ibkr_flex.csv", csv_text.encode("utf-8"))
+                    for warning in downloaded.attrs.get("chunk_warnings") or []:
+                        synced_notes.append(warning)
+                    written = save_flex_sync(csv_text, list(downloaded.attrs.get("chunks") or []))
+                    synced_notes.append("Saved this sync in data/flex. The next sync replaces those files.")
+                    st.session_state.ibkr_bundle = {
+                        "executions": synced_executions,
+                        "notes": synced_notes,
+                    }
+                    st.session_state.prefer_ibkr = True
+                    st.session_state.ibkr_error = ""
+                    status.write("Saved " + ", ".join(written))
+                    status.update(label=f"Synced {len(synced_executions):,} executions", state="complete")
+                except (FlexServiceError, Exception) as exc:
+                    message = str(exc)
+                    st.session_state.ibkr_error = message
+                    status.write(message)
+                    status.update(label="Flex sync failed", state="error")
 
     if uploaded is not None:
         upload_id = f"{uploaded.name}:{getattr(uploaded, 'size', len(uploaded.getvalue()))}"
@@ -3254,6 +3567,56 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
     leap_windows = year_windows(1, today=date_cls(2024, 2, 29))
     assert leap_windows[0][0] == date_cls(2023, 2, 28)
     assert leap_windows[-1][1] == date_cls(2024, 2, 29)
+    calendar = date_windows(date_cls(2024, 1, 1), date_cls(2024, 12, 31))
+    assert calendar
+    assert all((chunk_end - chunk_start).days <= 365 for chunk_start, chunk_end in calendar)
+    assert calendar[0][0] >= date_cls(2024, 1, 1)
+    assert calendar[-1][1] <= date_cls(2024, 12, 31)
+    assert all(chunk_start.weekday() < 5 and chunk_end.weekday() < 5 for chunk_start, chunk_end in calendar)
+    assert date_windows(date_cls(2026, 10, 3), date_cls(2026, 10, 4)) == []
+    long_range = date_windows(date_cls(2023, 1, 1), date_cls(2025, 6, 1))
+    assert len(long_range) >= 2
+    assert planned_flex_sync("2025", None, today=date_cls(2026, 10, 4)) == (date_cls(2025, 1, 1), date_cls(2025, 12, 31))
+    assert planned_flex_sync("2026", None, today=date_cls(2026, 10, 4)) == (date_cls(2026, 1, 1), date_cls(2026, 10, 4))
+    assert planned_flex_sync("Last 5 years", None, today=date_cls(2026, 10, 4)) == (None, None)
+    assert planned_flex_sync(
+        "Custom dates",
+        (date_cls(2024, 3, 1), date_cls(2024, 6, 15)),
+        today=date_cls(2026, 10, 4),
+    ) == (date_cls(2024, 3, 1), date_cls(2024, 6, 15))
+    try:
+        planned_flex_sync("Custom dates", (date_cls(2026, 1, 1),), today=date_cls(2026, 10, 4))
+        raise AssertionError("expected an incomplete custom range")
+    except ValueError as exc:
+        assert "start date" in str(exc)
+    assert flex_year_options(date_cls(2026, 10, 4))[0] == "2026"
+    assert flex_year_options(date_cls(2026, 10, 4))[-2:] == ["Last 5 years", "Custom dates"]
+    span = (date_cls(2021, 10, 14), date_cls(2026, 10, 2))
+    assert exit_window_bounds("All dates", *span, today=date_cls(2026, 10, 4)) == span
+    assert exit_window_bounds("Year to date", *span, today=date_cls(2026, 10, 4)) == (date_cls(2026, 1, 1), date_cls(2026, 10, 4))
+    assert exit_window_bounds("This month", *span, today=date_cls(2026, 10, 4)) == (date_cls(2026, 10, 1), date_cls(2026, 10, 4))
+    assert exit_window_bounds("Last month", *span, today=date_cls(2026, 10, 4)) == (date_cls(2026, 9, 1), date_cls(2026, 9, 30))
+    assert exit_window_bounds("Last month", *span, today=date_cls(2026, 1, 15)) == (date_cls(2025, 12, 1), date_cls(2025, 12, 31))
+    assert exit_window_bounds("This quarter", *span, today=date_cls(2026, 10, 4)) == (date_cls(2026, 10, 1), date_cls(2026, 10, 4))
+    assert exit_window_bounds("Last quarter", *span, today=date_cls(2026, 10, 4)) == (date_cls(2026, 7, 1), date_cls(2026, 9, 30))
+    assert exit_window_bounds("Last quarter", *span, today=date_cls(2026, 2, 2)) == (date_cls(2025, 10, 1), date_cls(2025, 12, 31))
+    assert exit_window_bounds("Last 7 days", *span, today=date_cls(2026, 10, 4)) == (date_cls(2026, 9, 28), date_cls(2026, 10, 4))
+    assert exit_window_bounds("Last 30 days", *span, today=date_cls(2026, 10, 4)) == (date_cls(2026, 9, 5), date_cls(2026, 10, 4))
+    assert exit_window_bounds("Last 6 months", *span, today=date_cls(2026, 10, 4)) == (date_cls(2026, 4, 4), date_cls(2026, 10, 4))
+    assert exit_window_bounds("Last 12 months", *span, today=date_cls(2024, 2, 29)) == (date_cls(2023, 2, 28), date_cls(2024, 2, 29))
+    assert exit_window_bounds("Calendar year", *span, year=2024) == (date_cls(2024, 1, 1), date_cls(2024, 12, 31))
+    assert exit_window_bounds("Quarter", *span, year=2024, quarter=1) == (date_cls(2024, 1, 1), date_cls(2024, 3, 31))
+    assert exit_window_bounds("Month", *span, year=2024, month=2) == (date_cls(2024, 2, 1), date_cls(2024, 2, 29))
+    assert exit_window_bounds("Month", *span, year=2023, month=2) == (date_cls(2023, 2, 1), date_cls(2023, 2, 28))
+    assert exit_window_bounds("Custom range", *span, custom_start=date_cls(2024, 3, 1), custom_end=date_cls(2024, 6, 15)) == (
+        date_cls(2024, 3, 1),
+        date_cls(2024, 6, 15),
+    )
+    try:
+        exit_window_bounds("Custom range", *span, custom_start=date_cls(2024, 6, 15), custom_end=date_cls(2024, 3, 1))
+        raise AssertionError("expected a reversed custom range")
+    except ValueError as exc:
+        assert "end date" in str(exc)
 
     code, statement_url = _send_response(
         "<FlexStatementResponse><Status>Success</Status><ReferenceCode>999</ReferenceCode>"
