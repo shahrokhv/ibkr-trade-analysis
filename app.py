@@ -19,7 +19,15 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from ibkr_service import DEFAULT_QUERY_ID, FlexServiceError, date_windows, fetch_ibkr_trades, hosted_publicly, year_windows
+from ibkr_service import (
+    DEFAULT_QUERY_ID,
+    FlexServiceError,
+    date_windows,
+    fetch_ibkr_trades,
+    hosted_publicly,
+    split_flex_tables,
+    year_windows,
+)
 
 EPS = 1e-8
 REVENGE_WINDOW = timedelta(minutes=10)
@@ -287,72 +295,6 @@ def _latest_nav_rows(rows: list[dict], date_col: str | None) -> tuple[list[dict]
         return rows, None
     latest = max(day for day, _row in dated)
     return [row for day, row in dated if day == latest], latest.isoformat()
-
-
-def _flex_tag(value: object) -> str:
-    return str(value or "").strip().strip('"').upper()
-
-
-def split_flex_tables(text: str, delimiter: str) -> list[tuple[str, list[dict]]]:
-    """Split an IBKR Flex CSV envelope (BOF/BOS/EOS) into named tables."""
-    rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
-    if not any(row and _flex_tag(row[0]) in {"BOF", "BOS"} for row in rows[:40]):
-        return []
-    tables: list[tuple[str, list[list[str]]]] = []
-    section_name = ""
-    bucket: list[list[str]] | None = None
-    loose: list[list[str]] = []
-
-    def flush_loose() -> None:
-        nonlocal loose
-        if loose:
-            tables.append(("", loose))
-            loose = []
-
-    def flush_section() -> None:
-        nonlocal bucket, section_name
-        if bucket:
-            tables.append((section_name, bucket))
-        bucket = None
-        section_name = ""
-
-    for row in rows:
-        if not row or not any(str(cell).strip() for cell in row):
-            continue
-        tag = _flex_tag(row[0])
-        if tag in {"BOF", "EOF", "BOA", "EOA"}:
-            flush_loose()
-            continue
-        if tag == "BOS":
-            flush_loose()
-            flush_section()
-            section_name = row[2].strip() if len(row) > 2 else ""
-            bucket = []
-            continue
-        if tag == "EOS":
-            flush_section()
-            continue
-        if bucket is not None:
-            bucket.append([str(cell).strip() for cell in row])
-        else:
-            loose.append([str(cell).strip() for cell in row])
-    flush_section()
-    flush_loose()
-
-    parsed: list[tuple[str, list[dict]]] = []
-    for name, body in tables:
-        if len(body) < 2:
-            continue
-        header = body[0]
-        records = []
-        for values in body[1:]:
-            if not values or _flex_tag(values[0]) in {"BOF", "EOF", "BOA", "EOA", "BOS", "EOS"}:
-                continue
-            padded = values + [""] * (len(header) - len(values))
-            records.append(dict(zip(header, padded[: len(header)])))
-        if records:
-            parsed.append((name, records))
-    return parsed
 
 
 def account_value_from_text(text: str, delimiter: str, decimal_comma: bool = False) -> dict | None:

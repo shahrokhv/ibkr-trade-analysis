@@ -6,6 +6,7 @@ as consecutive windows, then concatenated.
 
 from __future__ import annotations
 
+import csv
 import io
 import os
 import time
@@ -356,6 +357,90 @@ def _raise_response_error(root: ET.Element) -> None:
     raise FlexServiceError(message, code=code)
 
 
+def _flex_tag(value: object) -> str:
+    return str(value or "").strip().strip('"').upper()
+
+
+def split_flex_tables(text: str, delimiter: str) -> list[tuple[str, list[dict]]]:
+    """Split an IBKR Flex CSV envelope (BOF/BOS/EOS) into named tables."""
+    rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    if not any(row and _flex_tag(row[0]) in {"BOF", "BOS"} for row in rows[:40]):
+        return []
+    tables: list[tuple[str, list[list[str]]]] = []
+    section_name = ""
+    bucket: list[list[str]] | None = None
+    loose: list[list[str]] = []
+
+    def flush_loose() -> None:
+        nonlocal loose
+        if loose:
+            tables.append(("", loose))
+            loose = []
+
+    def flush_section() -> None:
+        nonlocal bucket, section_name
+        if bucket:
+            tables.append((section_name, bucket))
+        bucket = None
+        section_name = ""
+
+    for row in rows:
+        if not row or not any(str(cell).strip() for cell in row):
+            continue
+        tag = _flex_tag(row[0])
+        if tag in {"BOF", "EOF", "BOA", "EOA"}:
+            flush_loose()
+            continue
+        if tag == "BOS":
+            flush_loose()
+            flush_section()
+            section_name = row[2].strip() if len(row) > 2 else ""
+            bucket = []
+            continue
+        if tag == "EOS":
+            flush_section()
+            continue
+        if bucket is not None:
+            bucket.append([str(cell).strip() for cell in row])
+        else:
+            loose.append([str(cell).strip() for cell in row])
+    flush_section()
+    flush_loose()
+
+    parsed: list[tuple[str, list[dict]]] = []
+    for name, body in tables:
+        if len(body) < 2:
+            continue
+        header = body[0]
+        records = []
+        for values in body[1:]:
+            if not values or _flex_tag(values[0]) in {"BOF", "EOF", "BOA", "EOA", "BOS", "EOS"}:
+                continue
+            padded = values + [""] * (len(header) - len(values))
+            records.append(dict(zip(header, padded[: len(header)])))
+        if records:
+            parsed.append((name, records))
+    return parsed
+
+
+def _flex_trade_frame(csv_text: str) -> pd.DataFrame | None:
+    """Trade rows from a Flex envelope. Kept here so Sync does not import app.py."""
+    sample = "\n".join(csv_text.splitlines()[:40])
+    counts = {",": sample.count(","), ";": sample.count(";"), "\t": sample.count("\t")}
+    delimiter = max(counts, key=counts.get)
+    frames = []
+    for _name, records in split_flex_tables(csv_text, delimiter):
+        if not records:
+            continue
+        keys = {"".join(ch for ch in str(key).lower() if ch.isalnum()) for key in records[0]}
+        if "symbol" not in keys:
+            continue
+        frames.append(pd.DataFrame.from_records(records))
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
 def statement_from_response(payload: str) -> tuple[str | None, str | None]:
     """Return ``(csv_text, None)`` when ready, or ``(None, message)`` while IBKR is still generating."""
     text = payload.lstrip("\ufeff").lstrip()
@@ -376,22 +461,29 @@ def statement_from_response(payload: str) -> tuple[str | None, str | None]:
     raise FlexServiceError("IBKR returned XML instead of the CSV statement. Set the Flex Query output format to CSV.")
 
 
-def _frame_from_csv(csv_text: str) -> pd.DataFrame:
-    # Imported here so this module can load before app.py finishes importing it.
-    from app import _choose_delimiter, flex_trade_frame, parse_section_rows, read_flat_frame
+def _loaded_parser():
+    """Use the already-running app module. Importing app.py here re-enters Sync and fails."""
+    import sys
 
-    delimiter = _choose_delimiter(csv_text)
-    trade_frame = flex_trade_frame(csv_text, delimiter)
+    for name in ("__main__", "app"):
+        module = sys.modules.get(name)
+        if module is not None and hasattr(module, "read_flat_frame") and hasattr(module, "_choose_delimiter"):
+            return module
+    return None
+
+
+def _frame_from_csv(csv_text: str) -> pd.DataFrame:
+    trade_frame = _flex_trade_frame(csv_text)
     if trade_frame is not None and not trade_frame.empty:
         return trade_frame
-    section_rows = parse_section_rows(csv_text, delimiter)
-    if section_rows:
-        frame = pd.DataFrame(section_rows).drop(columns=["_section"], errors="ignore")
-        frame.columns = [str(column).strip() for column in frame.columns]
-        return frame
-    try:
-        frame = read_flat_frame(csv_text, delimiter)
-    except Exception:
+    parser = _loaded_parser()
+    frame = None
+    if parser is not None:
+        try:
+            frame = parser.read_flat_frame(csv_text, parser._choose_delimiter(csv_text))
+        except Exception:
+            frame = None
+    if frame is None or frame.empty:
         try:
             frame = pd.read_csv(io.StringIO(csv_text), dtype=str, engine="python", on_bad_lines="skip")
         except Exception:
