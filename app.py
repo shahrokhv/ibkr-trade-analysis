@@ -991,25 +991,12 @@ def aggregate_fills(executions: pd.DataFrame) -> pd.DataFrame:
 
 
 def fx_multiplier(source: str, target: str, cad_per_usd: float) -> float | None:
-    """Scale a source-currency amount into the target currency.
+    """Scale one source-currency dollar into the target currency.
 
-    The quote is CAD per 1 USD. CAD display multiplies file dollars by that rate.
-    USD display divides by it, including when the file is already marked USD, so
-    the sidebar rate changes both currency choices.
+    USD trades stay in USD when USD is selected. The sidebar quote is only applied
+    when the display currency differs from the trade currency.
     """
-    origin = str(source or "USD").upper()
-    destination = str(target or "USD").upper()
-    if origin not in SUPPORTED_CURRENCIES or destination not in SUPPORTED_CURRENCIES:
-        return None
-    if cad_per_usd <= 0:
-        return None
-    if destination == "CAD":
-        if origin == "CAD":
-            return 1.0
-        return cad_per_usd
-    if destination == "USD":
-        return 1.0 / cad_per_usd
-    return None
+    return convert_account_amount(1.0, source or "USD", target or "USD", cad_per_usd)
 
 
 YAHOO_USDCAD_URL = "https://query1.finance.yahoo.com/v8/finance/chart/USDCAD=X?interval=1m&range=1d"
@@ -2830,15 +2817,15 @@ def render_dashboard(
     shown_quote = displayed_fx_quote(float(cad_per_usd), currency)
     if currency == "CAD":
         fx_slot.caption(f"CAD amounts use {shown_quote:.4f} Canadian dollars per 1 US dollar.")
-        rate_note = f"{shown_quote:.2f} CAD per 1 USD"
+        rate_note = f" at {shown_quote:.2f} CAD per 1 USD"
     else:
-        fx_slot.caption(f"USD amounts use {shown_quote:.4f} US dollars per 1 Canadian dollar.")
-        rate_note = f"{shown_quote:.2f} USD per 1 CAD"
+        fx_slot.caption("USD amounts are the trade dollars. The exchange rate is used only when you switch to CAD.")
+        rate_note = ""
     st.caption(
         f"{source_label}  ·  exits {start_day.isoformat()} to {end_day.isoformat()}  ·  "
         f"{len(raw_in_range)} raw fills  ·  {len(aggregated_in_range)} aggregated trades  ·  "
         f"{summary.closed_count} closed trades  ·  {len(matched.open_lots)} open lots  ·  "
-        f"shown in {currency} at {rate_note}  ·  FIFO, net of IB commission{latency_note}"
+        f"shown in {currency}{rate_note}  ·  FIFO, net of IB commission{latency_note}"
     )
 
     if exclude_outliers:
@@ -3783,8 +3770,8 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
         ]
     )
     usd_view, usd_notes = convert_executions(usd_book, "USD", 1.25)
-    assert abs(float(usd_view.iloc[0]["price"]) - 80) < 1e-6
-    assert any("USD" in note for note in usd_notes)
+    assert abs(float(usd_view.iloc[0]["price"]) - 100) < 1e-6
+    assert usd_notes == []
     cad_from_usd, _ = convert_executions(usd_book, "CAD", 1.25)
     assert abs(float(cad_from_usd.iloc[0]["price"]) - 125) < 1e-6
     nav_text = "\n".join(
