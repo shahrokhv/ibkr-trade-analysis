@@ -378,9 +378,12 @@ def statement_from_response(payload: str) -> tuple[str | None, str | None]:
 
 def _frame_from_csv(csv_text: str) -> pd.DataFrame:
     # Imported here so this module can load before app.py finishes importing it.
-    from app import _choose_delimiter, parse_section_rows, read_flat_frame
+    from app import _choose_delimiter, flex_trade_frame, parse_section_rows, read_flat_frame
 
     delimiter = _choose_delimiter(csv_text)
+    trade_frame = flex_trade_frame(csv_text, delimiter)
+    if trade_frame is not None and not trade_frame.empty:
+        return trade_frame
     section_rows = parse_section_rows(csv_text, delimiter)
     if section_rows:
         frame = pd.DataFrame(section_rows).drop(columns=["_section"], errors="ignore")

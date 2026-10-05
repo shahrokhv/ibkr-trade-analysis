@@ -289,9 +289,77 @@ def _latest_nav_rows(rows: list[dict], date_col: str | None) -> tuple[list[dict]
     return [row for day, row in dated if day == latest], latest.isoformat()
 
 
+def _flex_tag(value: object) -> str:
+    return str(value or "").strip().strip('"').upper()
+
+
+def split_flex_tables(text: str, delimiter: str) -> list[tuple[str, list[dict]]]:
+    """Split an IBKR Flex CSV envelope (BOF/BOS/EOS) into named tables."""
+    rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    if not any(row and _flex_tag(row[0]) in {"BOF", "BOS"} for row in rows[:40]):
+        return []
+    tables: list[tuple[str, list[list[str]]]] = []
+    section_name = ""
+    bucket: list[list[str]] | None = None
+    loose: list[list[str]] = []
+
+    def flush_loose() -> None:
+        nonlocal loose
+        if loose:
+            tables.append(("", loose))
+            loose = []
+
+    def flush_section() -> None:
+        nonlocal bucket, section_name
+        if bucket:
+            tables.append((section_name, bucket))
+        bucket = None
+        section_name = ""
+
+    for row in rows:
+        if not row or not any(str(cell).strip() for cell in row):
+            continue
+        tag = _flex_tag(row[0])
+        if tag in {"BOF", "EOF", "BOA", "EOA"}:
+            flush_loose()
+            continue
+        if tag == "BOS":
+            flush_loose()
+            flush_section()
+            section_name = row[2].strip() if len(row) > 2 else ""
+            bucket = []
+            continue
+        if tag == "EOS":
+            flush_section()
+            continue
+        if bucket is not None:
+            bucket.append([str(cell).strip() for cell in row])
+        else:
+            loose.append([str(cell).strip() for cell in row])
+    flush_section()
+    flush_loose()
+
+    parsed: list[tuple[str, list[dict]]] = []
+    for name, body in tables:
+        if len(body) < 2:
+            continue
+        header = body[0]
+        records = []
+        for values in body[1:]:
+            if not values or _flex_tag(values[0]) in {"BOF", "EOF", "BOA", "EOA", "BOS", "EOS"}:
+                continue
+            padded = values + [""] * (len(header) - len(values))
+            records.append(dict(zip(header, padded[: len(header)])))
+        if records:
+            parsed.append((name, records))
+    return parsed
+
+
 def account_value_from_text(text: str, delimiter: str, decimal_comma: bool = False) -> dict | None:
     """Latest net liquidation value and cash from a Net Asset Value section."""
-    rows = [row for row in parse_all_section_rows(text, delimiter) if _is_nav_section(str(row.get("_section") or ""))]
+    rows = [record for name, records in split_flex_tables(text, delimiter) if _is_nav_section(name) for record in records]
+    if not rows:
+        rows = [row for row in parse_all_section_rows(text, delimiter) if _is_nav_section(str(row.get("_section") or ""))]
     if not rows:
         return None
     columns = list(rows[0].keys())
@@ -718,10 +786,27 @@ def normalize_executions(frame: pd.DataFrame, decimal_comma: bool = False) -> tu
     return executions, notes
 
 
+def flex_trade_frame(text: str, delimiter: str) -> pd.DataFrame | None:
+    """Trade rows from an IBKR Flex CSV that wraps sections in BOS/EOS markers."""
+    frames = []
+    for _name, records in split_flex_tables(text, delimiter):
+        if records and _header_score(list(records[0].keys())) >= 0:
+            frames.append(pd.DataFrame.from_records(records))
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
 def load_executions(name: str, data: bytes) -> tuple[pd.DataFrame, list[str]]:
     text = decode_upload(name, data)
     delimiter = _choose_delimiter(text)
     decimal_comma = detect_decimal_comma(text, delimiter)
+    trade_frame = flex_trade_frame(text, delimiter)
+    if trade_frame is not None:
+        executions, notes = normalize_executions(trade_frame, decimal_comma)
+        if not executions.empty:
+            notes.insert(0, f"Read {len(executions)} executions from the IBKR Flex file.")
+            return executions, notes
     section_rows = parse_section_rows(text, delimiter)
     notes: list[str] = []
     if section_rows:
@@ -3758,6 +3843,28 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
     assert abs(class_value["net_liquidation"] - 9108) < 1e-6
     assert abs(class_value["cash"] - 9008) < 1e-6
     assert account_value_from_text("Symbol,Quantity\nAAPL,1\n", ",") is None
+    envelope = "\n".join(
+        [
+            '"BOF","ACCT","Query","2","20261001","20261002","20261005;013350","100","100"',
+            '"BOA","ACCT"',
+            '"BOS","EQUT","Net Asset Value (NAV) in Base; trade date basis"',
+            '"ReportDate","Cash","CashLong","CashShort","Total","TotalLong","TotalShort"',
+            '"20261001","9026.95","9026.95","0","9018.22","9027.38","-9.16"',
+            '"20261002","9008.87","9008.87","0","9000.14","9009.30","-9.16"',
+            '"EOS","EQUT","2","0"',
+            '"CurrencyPrimary","FXRateToBase","AssetClass","Symbol","Multiplier","DateTime","Quantity","TradePrice","Proceeds","IBCommission","Buy/Sell"',
+            '"USD","1","STK","AAPL","1","20261002;100000","10","100","-1000","-1","BUY"',
+            '"USD","1","STK","AAPL","1","20261002;110000","-10","110","1100","-1","SELL"',
+            '"EOA"',
+            '"EOF"',
+        ]
+    )
+    envelope_value = account_value_from_text(envelope, ",")
+    assert envelope_value["report_date"] == "2026-10-02"
+    assert abs(envelope_value["cash"] - 9008.87) < 1e-6
+    assert abs(envelope_value["net_liquidation"] - 9000.14) < 1e-6
+    envelope_book, _envelope_notes = load_executions("flex.csv", envelope.encode("utf-8"))
+    assert len(envelope_book) == 2
     assert abs(convert_account_amount(9008, "USD", "USD", 1.43) - 9008) < 1e-6
     assert abs(convert_account_amount(9008, "USD", "CAD", 1.43) - (9008 * 1.43)) < 1e-6
     from ibkr_service import _combine_statement_text
