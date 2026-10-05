@@ -3306,10 +3306,21 @@ def show_flex_query_guide() -> None:
 - Order Time
 - Level Of Detail
 
-3. Scroll down and click **Save**.
-4. Also select **Net Asset Value (NAV) in Base**. Keep Report Date, Cash, and Total. That section is the account's net liquidation value.
+3. Scroll down and click **Save**. Leave **Trades** checked.
 
-**Step 4. Export each year**
+**Step 4. Add net liquidation value**
+
+1. In the same Sections list, click **Net Asset Value (NAV) in Base**.
+2. In the field list, select these three fields:
+   - **Report Date**
+   - **Cash**
+   - **Total** (this is the total NAV field)
+3. Click **Save** on that section, then save the query.
+4. Confirm **Trades** still has a check mark. Both sections are required.
+
+Cash is the dollars sitting in the account. Total is the net liquidation value, including open positions.
+
+**Step 5. Export each year**
 
 IBKR limits one query to 365 days, so download one year at a time.
 
@@ -3321,7 +3332,7 @@ IBKR limits one query to 365 days, so download one year at a time.
 6. Click **Run** again and save that file as `trades_2022.csv`.
 7. Repeat for each year through the current date.
 
-**Step 5. Combine the yearly files into one**
+**Step 6. Combine the yearly files into one**
 
 Put the downloaded files in one folder, then use Python or Command Prompt. Upload `Trade_History_Combined.csv` with the file button in this sidebar.
         """
