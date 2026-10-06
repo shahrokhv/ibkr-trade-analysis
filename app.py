@@ -1713,6 +1713,58 @@ def sample_executions() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def partial_history_message(first_day: date, last_day: date) -> str | None:
+    """Warn when the file looks like a single calendar year rather than the full account."""
+    if first_day is None or last_day is None:
+        return None
+    if (last_day - first_day).days >= 400:
+        return None
+    if first_day.month != 1 or first_day.day != 1:
+        return None
+    return (
+        f"This download starts on {first_day.isoformat()}. "
+        "A sale of shares bought before that day can look like a new short. "
+        "Sync Last 5 years to keep the full history."
+    )
+
+
+def open_position_rows(open_lots: pd.DataFrame) -> pd.DataFrame:
+    """One row per symbol and side for shares the trade file has not closed."""
+    columns = ["Symbol", "Side", "Shares", "Opened for"]
+    if open_lots is None or open_lots.empty:
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for (symbol, side), group in open_lots.groupby(["symbol", "side"], sort=False):
+        shares = float(group["quantity"].sum())
+        opened_for = float((group["quantity"].astype(float) * group["entry_price"].astype(float) * group["multiplier"].astype(float)).sum())
+        rows.append(
+            {
+                "Symbol": symbol,
+                "Side": "Short" if str(side).lower() == "short" else "Long",
+                "Shares": shares,
+                "Opened for": opened_for,
+            }
+        )
+    frame = pd.DataFrame(rows, columns=columns)
+    return frame.sort_values(["Symbol", "Side"], kind="mergesort").reset_index(drop=True)
+
+
+def ticker_result_line(closed: pd.DataFrame, symbol: str, currency: str) -> str:
+    """Plain summary of one ticker's finished trades."""
+    group = closed[closed["symbol"].astype(str) == str(symbol)]
+    if group.empty:
+        return f"{symbol} has no finished trades in the dates you selected."
+    nets = group["net_pnl"].astype(float)
+    wins = float(nets[nets > EPS].sum())
+    losses = float(nets[nets < -EPS].sum())
+    return (
+        f"{symbol}: {len(group)} finished trades. "
+        f"Wins {format_money(wins, currency)}, "
+        f"losses {format_money(losses, currency)}, "
+        f"net {format_money(float(nets.sum()), currency)}."
+    )
+
+
 def format_money(value: float | None, currency: str = "USD") -> str:
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
         return "—"
@@ -2127,7 +2179,7 @@ def top_drivers_figure(totals: pd.DataFrame, top_n: int, currency: str) -> go.Fi
     return figure
 
 
-def show_ticker_table(totals: pd.DataFrame, currency: str) -> None:
+def show_ticker_table(totals: pd.DataFrame, currency: str, key: str | None = None):
     money_format = "dollar" if currency == "USD" else "C$%.2f"
     config = {
         "Net PnL": st.column_config.NumberColumn("Net PnL", format=money_format),
@@ -2135,10 +2187,15 @@ def show_ticker_table(totals: pd.DataFrame, currency: str) -> None:
         "Win Rate (%)": st.column_config.NumberColumn("Win Rate (%)", format="%.1f%%"),
         "Total Commissions": st.column_config.NumberColumn("Total Commissions", format=money_format),
     }
+    kwargs = {"hide_index": True, "column_config": config, "row_height": 28}
+    if key:
+        kwargs["on_select"] = "rerun"
+        kwargs["selection_mode"] = "single-row"
+        kwargs["key"] = key
     try:
-        st.dataframe(totals, width="stretch", hide_index=True, column_config=config, row_height=28)
+        return st.dataframe(totals, width="stretch", **kwargs)
     except TypeError:
-        st.dataframe(totals, use_container_width=True, hide_index=True, column_config=config)
+        return st.dataframe(totals, use_container_width=True, **kwargs)
 
 
 def distribution_figure(summary: Summary) -> go.Figure | None:
@@ -2547,11 +2604,49 @@ def prepare_trade_log(closed: pd.DataFrame) -> pd.DataFrame:
     return log[columns]
 
 
-def show_chart(figure: go.Figure) -> None:
+def show_chart(figure: go.Figure, key: str | None = None, on_select: str | None = None):
+    kwargs = {"theme": None, "width": "stretch"}
+    if key:
+        kwargs["key"] = key
+    if on_select:
+        kwargs["on_select"] = on_select
     try:
-        st.plotly_chart(figure, width="stretch", theme=None)
+        return st.plotly_chart(figure, **kwargs)
     except TypeError:
-        st.plotly_chart(figure, use_container_width=True)
+        kwargs.pop("width", None)
+        return st.plotly_chart(figure, use_container_width=True, **{k: v for k, v in kwargs.items() if k != "width"})
+
+
+def _point_symbol(event) -> str | None:
+    """Ticker from a clicked bar, when the chart was drawn with on_select."""
+    selection = getattr(event, "selection", None)
+    if selection is None and isinstance(event, dict):
+        selection = event.get("selection")
+    points = None
+    if selection is not None:
+        points = selection.get("points") if isinstance(selection, dict) else getattr(selection, "points", None)
+    if not points:
+        return None
+    point = points[0]
+    symbol = point.get("y") if isinstance(point, dict) else getattr(point, "y", None)
+    text = str(symbol or "").strip()
+    return text or None
+
+
+def _row_symbol(event, totals: pd.DataFrame) -> str | None:
+    """Ticker from a selected table row."""
+    selection = getattr(event, "selection", None)
+    if selection is None and isinstance(event, dict):
+        selection = event.get("selection")
+    rows = None
+    if selection is not None:
+        rows = selection.get("rows") if isinstance(selection, dict) else getattr(selection, "rows", None)
+    if not rows or totals is None or totals.empty:
+        return None
+    index = int(rows[0])
+    if index < 0 or index >= len(totals):
+        return None
+    return str(totals.iloc[index]["Symbol"])
 
 
 def show_table(frame: pd.DataFrame) -> None:
@@ -2713,7 +2808,41 @@ def render_account_value(account_value: dict | None, currency: str, cad_per_usd:
                 format_money(cash, currency),
                 f"Cash IBKR reported on {as_of}, in {base}. Open positions, such as short stock, are why this can be higher than the account value. It is not a converted Canadian-dollar amount.",
             )
-    st.caption(f"Both numbers are from the brokerage statement dated {as_of}, in {base}.")
+            show_stat(
+                columns[2],
+                "Open positions",
+                format_money(net_liquidation - cash, currency),
+                f"What the statement says is still open on {as_of}. This is the account value minus the cash balance.",
+            )
+    st.caption(f"Account value, cash, and open positions are from the brokerage statement dated {as_of}, in {base}.")
+
+
+def render_open_position_list(open_lots: pd.DataFrame, first_day: date, last_day: date, currency: str) -> None:
+    """Shares the trade file has not closed, plus a warning when the download is only one year."""
+    st.markdown("**What is still open**")
+    message = partial_history_message(first_day, last_day)
+    if message:
+        st.warning(message)
+    rows = open_position_rows(open_lots)
+    if rows.empty:
+        st.caption("The trade file has no unmatched shares.")
+        return
+    view = rows.copy()
+    view["Shares"] = view["Shares"].map(lambda value: f"{float(value):g}")
+    view["Opened for"] = view["Opened for"].map(lambda value: format_money(float(value), currency))
+    st.caption("These shares are still unmatched in the trade file. The amount is the price where they were opened, not today's price.")
+    show_table(view)
+
+
+def render_ticker_detail(closed: pd.DataFrame, symbol: str, currency: str) -> None:
+    """Finished trades that add up to one ticker's result."""
+    group = closed[closed["symbol"].astype(str) == str(symbol)]
+    summary = ticker_result_line(closed, symbol, currency)
+    safe = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    st.markdown(f"<p><strong>{safe}</strong></p>", unsafe_allow_html=True)
+    if group.empty:
+        return
+    show_table(prepare_trade_log(group))
 
 
 def render_dashboard(
@@ -2875,6 +3004,7 @@ def render_dashboard(
         st.caption("Asset type: " + ", ".join(selected_types) + ".")
 
     render_account_value(resolve_account_currency(account_value, executions), currency, float(cad_per_usd), source_label)
+    render_open_position_list(matched.open_lots, min_day, max_day, currency)
 
     metric_row_1 = st.columns(4)
     show_stat(
@@ -3020,14 +3150,42 @@ def render_dashboard(
             )
             drivers = top_drivers_figure(totals, int(top_n), currency)
             if drivers is not None:
-                show_chart(drivers)
+                chart_event = show_chart(drivers, key=f"winners-{filter_key}", on_select="rerun")
             else:
+                chart_event = None
                 st.caption("No winning or losing tickers in this date range.")
         if distribution is not None:
             with right:
                 show_chart(distribution)
-        st.caption("Every ticker with a closed round trip in the selected dates. Largest absolute net PnL is listed first.")
-        show_ticker_table(totals, currency)
+        focus_key = f"ticker-focus-{filter_key}"
+        request_key = f"ticker-request-{filter_key}"
+        chart_seen_key = f"ticker-chart-seen-{filter_key}"
+        table_seen_key = f"ticker-table-seen-{filter_key}"
+        options = ["All tickers"] + totals["Symbol"].astype(str).tolist()
+        requested = st.session_state.pop(request_key, None)
+        if requested in options:
+            st.session_state[focus_key] = requested
+        chart_symbol = _point_symbol(chart_event)
+        if chart_symbol and chart_symbol in options and chart_symbol != st.session_state.get(chart_seen_key):
+            st.session_state[chart_seen_key] = chart_symbol
+            st.session_state[focus_key] = chart_symbol
+        if st.session_state.get(focus_key) not in options:
+            st.session_state[focus_key] = "All tickers"
+        choice = st.selectbox(
+            "Look at one ticker",
+            options,
+            key=focus_key,
+            help="Click a bar in the winners and losers chart, click a row in the table, or choose a ticker here.",
+        )
+        if choice != "All tickers":
+            render_ticker_detail(closed, choice, currency)
+        st.caption("Click a bar or a row to see the wins and losses behind that ticker. Largest absolute result is listed first.")
+        table_event = show_ticker_table(totals, currency, key=f"ticker-table-{filter_key}")
+        table_symbol = _row_symbol(table_event, totals)
+        if table_symbol and table_symbol != st.session_state.get(table_seen_key):
+            st.session_state[table_seen_key] = table_symbol
+            st.session_state[request_key] = table_symbol
+            st.rerun()
 
     render_breakdown(closed, currency)
 
@@ -4158,6 +4316,26 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
         raise AssertionError("expected a reversed custom range")
     except ValueError as exc:
         assert "end date" in str(exc)
+    assert "Last 5 years" in (partial_history_message(date_cls(2026, 1, 1), date_cls(2026, 10, 5)) or "")
+    assert partial_history_message(date_cls(2021, 10, 4), date_cls(2026, 10, 5)) is None
+    assert partial_history_message(date_cls(2024, 1, 16), date_cls(2026, 10, 2)) is None
+    opens = open_position_rows(
+        pd.DataFrame(
+            [
+                {"symbol": "PTC", "side": "short", "quantity": 20, "entry_price": 192.5, "multiplier": 1},
+                {"symbol": "AMD", "side": "short", "quantity": 5, "entry_price": 100, "multiplier": 1},
+                {"symbol": "AMD", "side": "short", "quantity": 15, "entry_price": 110, "multiplier": 1},
+            ]
+        )
+    )
+    assert list(opens["Symbol"]) == ["AMD", "PTC"]
+    assert float(opens.loc[opens["Symbol"] == "AMD", "Shares"].iloc[0]) == 20
+    assert abs(float(opens.loc[opens["Symbol"] == "PTC", "Opened for"].iloc[0]) - 3850) < 1e-6
+    assert "Wins $200.00" in ticker_result_line(
+        pd.DataFrame([{"symbol": "AMD", "net_pnl": 200.0}, {"symbol": "AMD", "net_pnl": -50.0}]),
+        "AMD",
+        "USD",
+    )
 
     code, statement_url = _send_response(
         "<FlexStatementResponse><Status>Success</Status><ReferenceCode>999</ReferenceCode>"
