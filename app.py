@@ -1998,7 +1998,7 @@ def cumulative_figure(closed: pd.DataFrame, currency: str) -> go.Figure | None:
     )
     figure.add_hline(y=0, line_width=1, line_dash="dot", line_color=SLATE)
     figure.update_layout(
-        title="Cumulative realized PnL",
+        title="Running profit or loss",
         margin=dict(l=80, r=24, t=48, b=40),
         height=420,
         hovermode="x unified",
@@ -2180,7 +2180,7 @@ def underwater_figure(closed: pd.DataFrame, currency: str) -> go.Figure | None:
     )
     figure.add_hline(y=0, line_width=1, line_dash="dot", line_color=SLATE)
     figure.update_layout(
-        title="Drawdown from peak",
+        title="Drop from the high point",
         margin=dict(l=80, r=24, t=48, b=40),
         height=320,
         hovermode="x unified",
@@ -2287,7 +2287,7 @@ def hold_outcome_figure(closed: pd.DataFrame) -> go.Figure | None:
             )
         )
     figure.update_layout(
-        title="Hold time by outcome",
+        title="How long wins and losses were held",
         margin=dict(l=80, r=24, t=48, b=40),
         height=320,
         plot_bgcolor="rgba(0,0,0,0)",
@@ -2314,7 +2314,7 @@ def hold_bucket_figure(stats: pd.DataFrame, currency: str) -> go.Figure | None:
         )
     )
     figure.update_layout(
-        title="Net PnL by hold time",
+        title="Profit by how long the trade was held",
         margin=dict(l=100, r=24, t=48, b=40),
         height=320,
         plot_bgcolor="rgba(0,0,0,0)",
@@ -2329,20 +2329,22 @@ def hold_bucket_figure(stats: pd.DataFrame, currency: str) -> go.Figure | None:
 
 
 def render_hold_duration(closed: pd.DataFrame, currency: str) -> None:
-    st.subheader("Hold duration")
+    st.subheader("How long trades were held")
     if closed is None or closed.empty:
-        st.info("No closed trades in this date range to measure hold time.")
+        st.info("No finished trades in this date range to measure hold time.")
         return
     winner_hold, loser_hold = st.columns(2)
-    winner_hold.metric(
-        "Avg winner hold time",
+    show_stat(
+        winner_hold,
+        "Winners were held",
         format_duration(_mean_hold_seconds(closed, True)),
-        help="Average time from entry to exit for closed trades with net PnL above zero.",
+        "Average time from opening a trade to closing it, for trades that made money.",
     )
-    loser_hold.metric(
-        "Avg loser hold time",
+    show_stat(
+        loser_hold,
+        "Losers were held",
         format_duration(_mean_hold_seconds(closed, False)),
-        help="Average time from entry to exit for closed trades with net PnL below zero.",
+        "Average time from opening a trade to closing it, for trades that lost money.",
     )
     left, right = st.columns(2)
     outcome = hold_outcome_figure(closed)
@@ -2439,11 +2441,11 @@ def format_breakdown(stats: pd.DataFrame, currency: str) -> pd.DataFrame:
 
 
 def render_breakdown(closed: pd.DataFrame, currency: str) -> None:
-    st.subheader("Breakdown")
+    st.subheader("When the trades were opened")
     if closed is None or closed.empty:
         st.info("No closed trades in this date range to break down.")
         return
-    st.caption("Closed trades by the hour and weekday they were opened, then by side and asset class. Win rate leaves out breakeven trades.")
+    st.caption("Finished trades by the hour and weekday they were opened, then by long or short and by stocks or options.")
     hours = closed["entry_time"].dt.hour.map(lambda hour: f"{int(hour):02d}:00")
     weekdays = closed["entry_time"].dt.day_name()
     sides = closed["side"].fillna("").map(lambda value: str(value).title())
@@ -2452,8 +2454,8 @@ def render_breakdown(closed: pd.DataFrame, currency: str) -> None:
     else:
         assets = pd.Series(["Other"] * len(closed), index=closed.index)
     blocks = [
-        (group_breakdown(closed, hours, [f"{hour:02d}:00" for hour in range(24)]), "Net PnL by hour of entry"),
-        (group_breakdown(closed, weekdays, WEEKDAY_ORDER), "Net PnL by weekday of entry"),
+        (group_breakdown(closed, hours, [f"{hour:02d}:00" for hour in range(24)]), "Profit by the hour the trade was opened"),
+        (group_breakdown(closed, weekdays, WEEKDAY_ORDER), "Profit by the weekday the trade was opened"),
         (group_breakdown(closed, sides, ["Long", "Short"]), "Long versus short"),
         (group_breakdown(closed, assets, ["Stocks", "Options", "Other"]), "Stocks versus options"),
     ]
@@ -2592,6 +2594,12 @@ def inject_css() -> None:
             padding-top: 2px;
             padding-bottom: 2px;
         }
+        div[data-testid="stElementContainer"]:has(div[data-testid="stMetric"]) + div[data-testid="stElementContainer"] [data-testid="stCaptionContainer"] p {
+            font-size: 0.78rem;
+            line-height: 1.3;
+            margin-top: -0.2rem;
+            opacity: 0.85;
+        }
         """
         + (
             """
@@ -2622,7 +2630,13 @@ def running_locally() -> bool:
 
 def show_page_title() -> None:
     st.title("IBKR Trade Analysis")
-    st.caption("Parse Interactive Brokers exports, match round trips with FIFO, and review realized PnL.")
+    st.caption("See what your Interactive Brokers trades made or lost.")
+
+
+def show_stat(slot, title: str, value: str, explanation: str) -> None:
+    """Card title plus a plain-English line, so the meaning is on the card."""
+    slot.metric(title, value, help=explanation)
+    slot.caption(explanation)
 
 
 def render_empty_state() -> None:
@@ -2650,7 +2664,7 @@ def render_account_value(account_value: dict | None, currency: str, cad_per_usd:
     if not account_value or account_value.get("net_liquidation") is None:
         if source_label == "IBKR Flex Query":
             st.info(
-                "Net liquidation value is not in this download yet. Click Sync with IBKR once so the updated query, including Net Asset Value (NAV) in Base, is loaded."
+                "Account value is not in this download yet. Click Sync with IBKR once so the updated query, including Net Asset Value (NAV) in Base, is loaded."
             )
         return
     base = str(account_value.get("currency") or "USD")
@@ -2659,20 +2673,22 @@ def render_account_value(account_value: dict | None, currency: str, cad_per_usd:
     if net_liquidation is None:
         return
     columns = st.columns(4)
-    columns[0].metric(
-        "Net liquidation value",
+    show_stat(
+        columns[0],
+        "Account value",
         format_money(net_liquidation, currency),
-        help=f"Account value from the Flex query as of {as_of}. This is the margin-account balance, separate from closed-trade profit.",
+        f"What the account was worth on {as_of}. This is the balance, not the trading profit.",
     )
     if account_value.get("cash") is not None:
         cash = convert_account_amount(float(account_value["cash"]), base, currency, cad_per_usd)
         if cash is not None:
-            columns[1].metric(
-                "Cash",
+            show_stat(
+                columns[1],
+                "Cash in the account",
                 format_money(cash, currency),
-                help=f"Cash from the same NAV section as of {as_of}.",
+                f"Cash sitting in the account on {as_of}.",
             )
-    st.caption(f"Account value as of {as_of}, from Net Asset Value (NAV) in Base. Statement currency {base}.")
+    st.caption(f"Taken from the brokerage statement dated {as_of}. Statement currency {base}.")
 
 
 def render_dashboard(
@@ -2836,108 +2852,126 @@ def render_dashboard(
     render_account_value(resolve_account_currency(account_value, executions), currency, float(cad_per_usd), source_label)
 
     metric_row_1 = st.columns(4)
-    metric_row_1[0].metric(
-        "Net realized PnL",
+    show_stat(
+        metric_row_1[0],
+        "Money made or lost",
         format_money(summary.net_pnl, currency),
-        help="Closed round trips in the selected dates, after commission, in the currency selected in the sidebar.",
+        "Profit or loss on trades that are finished, after fees.",
     )
-    metric_row_1[1].metric(
-        "Commissions & fees",
+    show_stat(
+        metric_row_1[1],
+        "Fees you paid",
         format_money(summary.commissions, currency),
-        help="IB Commission on fills in the selected dates.",
+        "Broker fees on the trades in the dates you selected.",
     )
-    metric_row_1[2].metric(
-        "Win rate",
+    show_stat(
+        metric_row_1[2],
+        "Trades that made money",
         format_percent(summary.win_rate),
-        help="Winners divided by winners and losers. Breakeven trades are left out.",
+        "Of the finished trades that won or lost, the share that made money. Break-even trades are left out.",
     )
-    metric_row_1[3].metric(
-        "Profit factor",
+    show_stat(
+        metric_row_1[3],
+        "Winnings vs losses",
         format_factor(summary.profit_factor),
-        help="Total amount won divided by the total amount lost.",
+        "Total money won divided by total money lost. Above 1 means the wins were larger than the losses.",
     )
 
     metric_row_2 = st.columns(4)
-    metric_row_2[0].metric(
-        "Expectancy",
+    show_stat(
+        metric_row_2[0],
+        "Average per trade",
         format_money(summary.expectancy, currency),
-        help="Net realized PnL divided by the number of closed trades.",
+        "Money made or lost, divided by the number of finished trades.",
     )
-    metric_row_2[1].metric(
-        "Average winning trade",
+    show_stat(
+        metric_row_2[1],
+        "Average win",
         format_money(summary.avg_win, currency),
-        help="Mean net PnL of the winning trades.",
+        "Typical profit on a trade that made money, after fees.",
     )
-    metric_row_2[2].metric(
-        "Average losing trade",
+    show_stat(
+        metric_row_2[2],
+        "Average loss",
         format_money(summary.avg_loss, currency),
-        help="Mean net PnL of the losing trades.",
+        "Typical loss on a trade that lost money, after fees.",
     )
-    metric_row_2[3].metric(
-        "Max drawdown",
+    show_stat(
+        metric_row_2[3],
+        "Biggest drop",
         format_money(summary.max_drawdown, currency),
-        help="Largest peak-to-trough drop on the cumulative realized-PnL curve.",
+        "How far the running profit fell from its highest point.",
     )
 
-    st.markdown("**Risk & Efficiency**")
+    st.markdown("**Wins compared with losses**")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric(
-        "Payoff ratio",
+    show_stat(
+        col1,
+        "Win size vs loss size",
         format_factor(summary.payoff_ratio),
-        help="Ratio of average win size to average loss size. Values > 1.0 mean your winners are larger than your losers.",
+        "Average win divided by average loss. Above 1 means a typical win is larger than a typical loss.",
     )
-    col2.metric(
-        "Return / max drawdown",
+    show_stat(
+        col2,
+        "Profit vs the biggest drop",
         format_factor(summary.return_on_drawdown),
-        help="Net Realized PnL divided by Max Drawdown. Measures return efficiency relative to peak drawdown risk.",
+        "Money made or lost, divided by the biggest drop.",
     )
-    col3.metric(
-        "Commission drag",
+    show_stat(
+        col3,
+        "Share taken by fees",
         format_percent(summary.commission_drag),
-        help="Percentage of gross profit consumed by broker commissions and execution fees.",
+        "Fees compared with the result before fees. A negative percent means the trades lost money, so this is not a share of profit.",
     )
-    col4.metric(
-        "Max consecutive losses",
+    show_stat(
+        col4,
+        "Longest losing streak",
         f"{summary.max_consecutive_losses:,}",
-        help="The longest streak of consecutive losing trades in the selected date range.",
+        "The most losing trades in a row in the dates you selected.",
     )
-    st.columns(4)[0].metric(
-        "Leveraged net PnL",
+    show_stat(
+        st.columns(4)[0],
+        "Leveraged funds",
         format_money(leveraged_net_pnl(closed), currency),
-        help="Net realized PnL of closed trades in the leveraged and yield ETFs (SOXL, SOXS, TQQQ, SQQQ, UPRO, SPXU, MSTY, TSLY, CONY, AMZY, APLY, UVXY), using the current filters.",
+        "Profit or loss from SOXL, SOXS, TQQQ, SQQQ, UPRO, SPXU, MSTY, TSLY, CONY, AMZY, APLY, and UVXY only.",
     )
 
     metric_row_3 = st.columns(4)
-    metric_row_3[0].metric(
-        "Closed trades",
+    show_stat(
+        metric_row_3[0],
+        "Finished trades",
         f"{summary.closed_count:,}",
-        help="Round trips that finished inside the selected dates.",
+        "Trades that were opened and then closed in the dates you selected.",
     )
-    metric_row_3[1].metric(
-        "Raw fills",
+    show_stat(
+        metric_row_3[1],
+        "Individual fills",
         f"{len(raw_in_range):,}",
-        help="Execution rows before partial fills are grouped.",
+        "Each time an order was filled, before small fills are grouped together.",
     )
-    metric_row_3[2].metric(
-        "Aggregated trades",
+    show_stat(
+        metric_row_3[2],
+        "Fills grouped together",
         f"{len(aggregated_in_range):,}",
-        help="Fills merged when the same ticker and side print within 5 seconds. FIFO uses these.",
+        "Fills of the same stock, on the same side, within 5 seconds, counted as one trade.",
     )
-    metric_row_3[3].metric(
-        "Open lots",
+    show_stat(
+        metric_row_3[3],
+        "Still open",
         f"{len(matched.open_lots):,}",
-        help="Positions still open after FIFO. They are not included in realized PnL.",
+        "Shares that are not closed yet. They are not included in the profit above.",
     )
     grouped_away = len(raw_in_range) - len(aggregated_in_range)
-    st.columns(4)[0].metric(
-        "Fills combined",
+    show_stat(
+        st.columns(4)[0],
+        "Partial fills merged",
         f"{max(grouped_away, 0):,}",
-        help="Raw fills minus aggregated trades. This is how many partial prints were folded into a grouped trade.",
+        "How many separate fills were folded into a grouped trade.",
     )
 
     render_hold_duration(closed, currency)
 
-    st.subheader("Performance")
+    st.subheader("How the results added up")
     if closed.empty:
         st.info("No round trips close inside this date range. Open lots are listed further down.")
     else:
@@ -2972,7 +3006,7 @@ def render_dashboard(
 
     render_breakdown(closed, currency)
 
-    st.subheader("Mistake identification")
+    st.subheader("Habits to watch")
     render_behavior(revenge, large_losses, holding, busy_days, currency)
     render_event_flags(raw_in_range)
 

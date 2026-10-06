@@ -97,22 +97,22 @@ def render_html(closed: pd.DataFrame, summary, currency: str, cad_per_usd: float
     lev_tone = "good" if leveraged >= 0 else "bad"
     cards = "".join(
         [
-            _card("Net realized PnL", format_money(summary.net_pnl, currency), pnl_tone),
-            _card("Commissions & fees", format_money(summary.commissions, currency)),
-            _card("Win rate", format_percent(summary.win_rate)),
-            _card("Profit factor", format_factor(summary.profit_factor)),
-            _card("Expectancy", format_money(summary.expectancy, currency)),
-            _card("Average winning trade", format_money(summary.avg_win, currency)),
-            _card("Average losing trade", format_money(summary.avg_loss, currency)),
-            _card("Max drawdown", format_money(summary.max_drawdown, currency), "bad"),
-            _card("Payoff ratio", format_factor(summary.payoff_ratio)),
-            _card("Return / max drawdown", format_factor(summary.return_on_drawdown)),
-            _card("Commission drag", format_percent(summary.commission_drag)),
-            _card("Max consecutive losses", f"{summary.max_consecutive_losses:,}"),
-            _card("Leveraged net PnL", format_money(leveraged, currency), lev_tone),
-            _card("Closed trades", f"{summary.closed_count:,}"),
-            _card("Avg winner hold", format_duration(_mean_hold_seconds(closed, True))),
-            _card("Avg loser hold", format_duration(_mean_hold_seconds(closed, False))),
+            _card("Money made or lost", format_money(summary.net_pnl, currency), pnl_tone),
+            _card("Fees you paid", format_money(summary.commissions, currency)),
+            _card("Trades that made money", format_percent(summary.win_rate)),
+            _card("Winnings vs losses", format_factor(summary.profit_factor)),
+            _card("Average per trade", format_money(summary.expectancy, currency)),
+            _card("Average win", format_money(summary.avg_win, currency)),
+            _card("Average loss", format_money(summary.avg_loss, currency)),
+            _card("Biggest drop", format_money(summary.max_drawdown, currency), "bad"),
+            _card("Win size vs loss size", format_factor(summary.payoff_ratio)),
+            _card("Profit vs the biggest drop", format_factor(summary.return_on_drawdown)),
+            _card("Share taken by fees", format_percent(summary.commission_drag)),
+            _card("Longest losing streak", f"{summary.max_consecutive_losses:,}"),
+            _card("Leveraged funds", format_money(leveraged, currency), lev_tone),
+            _card("Finished trades", f"{summary.closed_count:,}"),
+            _card("Winners were held", format_duration(_mean_hold_seconds(closed, True))),
+            _card("Losers were held", format_duration(_mean_hold_seconds(closed, False))),
         ]
     )
     charts = [
