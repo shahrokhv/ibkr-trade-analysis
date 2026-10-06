@@ -2677,18 +2677,18 @@ def render_account_value(account_value: dict | None, currency: str, cad_per_usd:
         columns[0],
         "Account value",
         format_money(net_liquidation, currency),
-        f"What the account was worth on {as_of}. This is the balance, not the trading profit.",
+        f"What was left on {as_of}, after open positions. This is the balance, not the trading profit.",
     )
     if account_value.get("cash") is not None:
         cash = convert_account_amount(float(account_value["cash"]), base, currency, cad_per_usd)
         if cash is not None:
             show_stat(
                 columns[1],
-                "Cash in the account",
+                "Cash balance",
                 format_money(cash, currency),
-                f"Cash sitting in the account on {as_of}.",
+                f"Cash IBKR reported on {as_of}, in {base}. Open positions, such as short stock, are why this can be higher than the account value. It is not a converted Canadian-dollar amount.",
             )
-    st.caption(f"Taken from the brokerage statement dated {as_of}. Statement currency {base}.")
+    st.caption(f"Both numbers are from the brokerage statement dated {as_of}, in {base}.")
 
 
 def render_dashboard(
