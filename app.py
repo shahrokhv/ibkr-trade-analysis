@@ -1867,17 +1867,27 @@ def exit_window_bounds(
     raise ValueError(f"Unknown exit date filter: {preset}")
 
 
+def _clamp_filter_day(day: date, floor: date, ceiling: date) -> date:
+    if day < floor:
+        return floor
+    if day > ceiling:
+        return ceiling
+    return day
+
+
 def render_exit_date_filter(min_day: date, max_day: date, filter_key: str) -> tuple[date, date] | None:
-    """Draw the exit-date filter and return the inclusive window, or None if a custom range is incomplete."""
+    """Draw the exit-date filter and return the inclusive window."""
     preset_key = f"exit-preset-{filter_key}"
-    range_key = f"exit-range-{filter_key}"
-    applied_key = f"exit-applied-{filter_key}"
+    memory_key = f"exit-memory-{filter_key}"
+    previous_key = f"exit-prev-preset-{filter_key}"
+    from_key = f"exit-from-{filter_key}"
+    to_key = f"exit-to-{filter_key}"
     preset = st.pills(
         "Exit dates",
         EXIT_DATE_PRESETS,
         default="All dates",
         key=preset_key,
-        help="Closed trades stay when the exit falls in this window. FIFO still uses earlier fills, so that exit keeps its original entry.",
+        help="Choose a shortcut, or Custom range and then pick a From date and a To date. A trade is included when it closed inside those days.",
         width="stretch",
     )
     if preset not in EXIT_DATE_PRESETS:
@@ -1910,66 +1920,64 @@ def render_exit_date_filter(min_day: date, max_day: date, filter_key: str) -> tu
                 )
             month = _MONTH_NAMES.index(str(month_label)) + 1
 
-    if preset == "Custom range":
-        signature = ("Custom range",)
-    else:
-        signature = (preset, year, quarter if preset == "Quarter" else 0, month if preset == "Month" else 0)
-        if st.session_state.get(applied_key) != signature or range_key not in st.session_state:
-            try:
-                st.session_state[range_key] = exit_window_bounds(
-                    preset,
-                    min_day,
-                    max_day,
-                    year=year,
-                    quarter=quarter,
-                    month=month,
-                )
-            except ValueError as exc:
-                st.warning(str(exc))
-                return None
-            st.session_state[applied_key] = signature
-
     floor = date(min_day.year, 1, 1)
     ceiling = date(max(max_day.year, date.today().year), 12, 31)
-    stored = st.session_state.get(range_key, (min_day, max_day))
-    if not isinstance(stored, (list, tuple)) or len(stored) != 2:
-        stored = (min_day, max_day)
-    start_stored = min(max(stored[0], floor), ceiling)
-    end_stored = min(max(stored[1], floor), ceiling)
-    if end_stored < start_stored:
-        end_stored = start_stored
-    st.session_state[range_key] = (start_stored, end_stored)
 
-    range_col, _rest = st.columns([1.35, 2])
-    with range_col:
-        picked = st.date_input(
-            "Exit date range",
-            min_value=floor,
-            max_value=ceiling,
-            key=range_key,
-            help="This range is the filter. A preset fills it in. Changing either date keeps your own range.",
-        )
-    if not isinstance(picked, (list, tuple)) or len(picked) != 2:
-        st.warning("Select both a start date and an end date.")
-        return None
-    start_day, end_day = picked
-    if end_day < start_day:
-        st.warning("The end date must be on or after the start date.")
-        return None
     if preset != "Custom range":
-        expected = exit_window_bounds(
-            preset,
-            min_day,
-            max_day,
-            year=year,
-            quarter=quarter,
-            month=month,
-        )
-        if (start_day, end_day) != expected:
-            st.session_state[preset_key] = "Custom range"
-            st.session_state[applied_key] = ("Custom range",)
-            st.rerun()
-    st.caption(f"Showing exits from {start_day.isoformat()} through {end_day.isoformat()}.")
+        try:
+            start_day, end_day = exit_window_bounds(
+                preset,
+                min_day,
+                max_day,
+                year=year,
+                quarter=quarter,
+                month=month,
+            )
+        except ValueError as exc:
+            st.warning(str(exc))
+            return None
+        st.session_state[memory_key] = (start_day, end_day)
+        st.session_state[previous_key] = preset
+        st.caption(f"Showing exits from {start_day.isoformat()} through {end_day.isoformat()}.")
+        return start_day, end_day
+
+    remembered = st.session_state.get(memory_key, (min_day, max_day))
+    if not isinstance(remembered, (list, tuple)) or len(remembered) != 2:
+        remembered = (min_day, max_day)
+    if st.session_state.get(previous_key) != "Custom range":
+        st.session_state[from_key] = _clamp_filter_day(remembered[0], floor, ceiling)
+        st.session_state[to_key] = _clamp_filter_day(remembered[1], floor, ceiling)
+    elif from_key not in st.session_state or to_key not in st.session_state:
+        st.session_state[from_key] = _clamp_filter_day(remembered[0], floor, ceiling)
+        st.session_state[to_key] = _clamp_filter_day(remembered[1], floor, ceiling)
+    st.session_state[previous_key] = "Custom range"
+
+    st.caption("Pick the first day under From and the last day under To. You do not need to click the calendar twice.")
+    from_col, to_col = st.columns(2)
+    start_day = from_col.date_input(
+        "From",
+        min_value=floor,
+        max_value=ceiling,
+        format="YYYY/MM/DD",
+        key=from_key,
+        help="First day of closed trades to include.",
+    )
+    end_day = to_col.date_input(
+        "To",
+        min_value=floor,
+        max_value=ceiling,
+        format="YYYY/MM/DD",
+        key=to_key,
+        help="Last day of closed trades to include.",
+    )
+    if start_day is None or end_day is None:
+        st.warning("Choose both a From date and a To date.")
+        return None
+    if end_day < start_day:
+        start_day, end_day = end_day, start_day
+        st.caption(f"Showing exits from {start_day.isoformat()} through {end_day.isoformat()}. The two dates were put in order.")
+    else:
+        st.caption(f"Showing exits from {start_day.isoformat()} through {end_day.isoformat()}.")
     if end_day < min_day or start_day > max_day:
         st.info(
             f"No exits in this file fall in that window. The file runs {min_day.isoformat()} to {max_day.isoformat()}."
