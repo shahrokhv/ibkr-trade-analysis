@@ -528,6 +528,14 @@ def _is_summary_symbol(symbol: str) -> bool:
     return symbol.startswith("TOTAL ") or symbol.startswith("SUBTOTAL")
 
 
+def _is_currency_conversion(symbol: str, asset: str) -> bool:
+    """IBKR forex rows, such as USD.CAD, are cash moves rather than stock trades."""
+    asset_key = _section_key(asset)
+    if asset_key in {"cash", "forex", "fx"}:
+        return True
+    return re.fullmatch(r"[A-Z]{3}\.[A-Z]{3}", symbol) is not None
+
+
 def _infer_multiplier(quantity: float, price: float, proceeds: float | None) -> float:
     if not quantity or not price or proceeds is None:
         return 1.0
@@ -665,6 +673,7 @@ def normalize_executions(frame: pd.DataFrame, decimal_comma: bool = False) -> tu
 
     records = []
     skipped = 0
+    conversions = 0
     for index, row in enumerate(frame.to_dict(orient="records")):
         symbol = str(row.get(symbol_col, "")).strip().upper()
         if _is_summary_symbol(symbol):
@@ -702,6 +711,9 @@ def normalize_executions(frame: pd.DataFrame, decimal_comma: bool = False) -> tu
         latency = None
         if not pd.isna(order_time):
             latency = (trade_time - order_time).total_seconds()
+        if _is_currency_conversion(symbol, asset):
+            conversions += 1
+            continue
         records.append(
             {
                 "symbol": symbol,
@@ -730,6 +742,11 @@ def normalize_executions(frame: pd.DataFrame, decimal_comma: bool = False) -> tu
 
     if skipped:
         notes.append(f"Skipped {skipped} rows that were totals, blanks, or missing a symbol, time, quantity, or price.")
+    if conversions:
+        notes.append(
+            f"Left out {conversions} currency conversion{'s' if conversions != 1 else ''}. "
+            "Those are cash moves, such as USD.CAD, not stock trades."
+        )
     records = _fold_fx_to_base(records, notes)
     executions = pd.DataFrame.from_records(records, columns=EXEC_COLUMNS)
     if executions.empty:
@@ -3723,6 +3740,18 @@ Trades,Data,ClosedLot,Stocks,USD,AAPL,"2024-03-01, 10:00:00",100,110,11000,-1,C
     flat_exec, _ = load_executions("trades.csv", flat.encode("utf-8"))
     assert len(flat_exec) == 2
     assert abs(match_fifo(flat_exec).closed.iloc[0]["net_pnl"] - 199) < 1e-6
+    fx_book = (
+        "Symbol,AssetClass,Date/Time,Buy/Sell,Quantity,TradePrice,Proceeds,IBCommission\n"
+        "AAPL,STK,2024-05-01 09:30:00,BUY,10,100,-1000,-1\n"
+        "AAPL,STK,2024-05-02 09:30:00,SELL,10,110,1100,-1\n"
+        "USD.CAD,CASH,2024-05-01 12:00:00,BUY,1000,1.36,-1360,-2\n"
+        "BRK.B,STK,2024-05-03 09:30:00,BUY,1,400,-400,-1\n"
+    )
+    fx_exec, fx_notes = load_executions("fx.csv", fx_book.encode("utf-8"))
+    assert list(fx_exec["symbol"]) == ["AAPL", "AAPL", "BRK.B"]
+    assert any("currency conversion" in note for note in fx_notes)
+    assert not _is_currency_conversion("BRK.B", "STK")
+    assert _is_currency_conversion("USD.CAD", "CASH")
 
     demo = sample_executions()
     assert set(demo["trade_time"].dt.year) == {2024, 2025, 2026}
